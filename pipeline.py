@@ -881,12 +881,12 @@ class ParallelVoiceAssistant:
                 return True
         return False
 
-    def _queue_intermediate_transcription(self, reason: str) -> None:
+    def _queue_intermediate_transcription(self, reason: str, *, mark_final: bool = False) -> None:
         if self._stt_flush_in_progress:
             return
 
         flush_id = self._next_finalize_id
-        future = self.stt.finalize(flush_id, mark_final=False)
+        future = self.stt.finalize(flush_id, mark_final=mark_final)
         if future is None:
             return
 
@@ -900,11 +900,32 @@ class ParallelVoiceAssistant:
     def _is_silent_chunk(self, audio_chunk: np.ndarray) -> bool:
         if audio_chunk.size == 0:
             return True
+
         audio_view = np.asarray(audio_chunk, dtype=np.int16)
         if audio_view.ndim > 1:
             audio_view = audio_view.reshape(-1)
-        rms = float(np.sqrt(np.mean(np.square(audio_view.astype(np.float32)))))
-        return rms < self._silence_threshold
+
+        audio_float = audio_view.astype(np.float32)
+        if audio_float.size == 0:
+            return True
+
+        abs_audio = np.abs(audio_float)
+        rms = float(np.sqrt(np.mean(np.square(audio_float))))
+        peak = float(abs_audio.max())
+
+        if rms < self._silence_threshold and peak < (self._silence_threshold * 1.5):
+            return True
+
+        # Guard against sporadic spikes being treated as speech by checking how
+        # much of the chunk actually carries energy above the threshold.
+        samples_above = float(np.count_nonzero(abs_audio > self._silence_threshold))
+        fraction_above = samples_above / float(abs_audio.size)
+        percentile_95 = float(np.percentile(abs_audio, 95))
+
+        if fraction_above < 0.01 and percentile_95 < (self._silence_threshold * 1.4):
+            return True
+
+        return False
 
 
     def _request_stop(self, reason: str) -> None:
@@ -926,6 +947,14 @@ class ParallelVoiceAssistant:
         if self._stop_requested:
             return
         self._consecutive_silent_chunks += 1
+        if self._consecutive_silent_chunks == self._silent_chunks_before_stop:
+            self._queue_intermediate_transcription(
+                (
+                    f"[STT] Detected {self._consecutive_silent_chunks} "
+                    "silent chunks; finalizing pending audio."
+                ),
+                mark_final=True,
+            )
         if self._consecutive_silent_chunks < self._silent_chunks_before_stop:
             return
         if self._has_detected_speech:
