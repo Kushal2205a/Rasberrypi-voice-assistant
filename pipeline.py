@@ -1207,6 +1207,31 @@ class ParallelVoiceAssistant:
 
             treat_as_silence = is_noise or not normalized
 
+            prior_activity = self._chunk_activity.get(res_chunk_id, False)
+            had_discernible_energy = bool(
+                energy is not None and not self._energy_matches_noise_floor(*energy)
+            )
+
+            placeholder_empty_chunk = (
+                treat_as_silence
+                and not normalized
+                and prior_activity
+                and not self.stt.emit_partials
+                and had_discernible_energy
+            )
+
+            if placeholder_empty_chunk:
+                noise_suffix = ""
+                if energy is not None:
+                    noise_suffix = f" (RMS {energy[0]:.1f})"
+                print(
+                    f"[STT] Chunk {res_chunk_id}: [placeholder]{noise_suffix} "
+                    "(awaiting final transcription)"
+                )
+                # Keep the activity marker so that subsequent genuine silence handling
+                # does not prematurely advance the stop logic.
+                continue
+
             if treat_as_silence:
                 display_text = text if text else "[silence]"
                 noise_suffix = ""
