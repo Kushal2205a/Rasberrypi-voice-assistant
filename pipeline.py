@@ -847,7 +847,13 @@ class ParallelVoiceAssistant:
 
         self._chunk_activity: Dict[int, bool] = {}
         self._chunk_energy: Dict[int, Tuple[float, float]] = {}
+
         self._finalize_request_id = 1_000_000
+
+        self._noise_floor_rms: Optional[float] = None
+        self._noise_floor_peak: Optional[float] = None
+        self._noise_floor_updates = 0
+
 
         self._noise_floor_rms: Optional[float] = None
         self._noise_floor_peak: Optional[float] = None
@@ -907,6 +913,7 @@ class ParallelVoiceAssistant:
     def _energy_matches_noise_floor(self, rms: float, peak: float) -> bool:
         rms_threshold, peak_threshold = self._noise_thresholds()
         return rms <= rms_threshold and peak <= peak_threshold
+
 
     def _is_silent_chunk(self, chunk_id: int, audio_chunk: np.ndarray) -> bool:
         if audio_chunk.size == 0:
@@ -1186,6 +1193,7 @@ class ParallelVoiceAssistant:
 
             # Normalize for noise checks
             normalized = (text or "").strip().lower()
+
             energy = self._chunk_energy.pop(res_chunk_id, None)
 
             # Check blacklist exact matches first, then regex for variants
@@ -1195,6 +1203,7 @@ class ParallelVoiceAssistant:
                     is_noise = True
                 elif self._noise_regex.search(normalized):
                     is_noise = True
+
 
             treat_as_silence = is_noise or not normalized
 
@@ -1210,6 +1219,7 @@ class ParallelVoiceAssistant:
                     f"[STT] Chunk {res_chunk_id}: {display_text} (treated as silence){noise_suffix}"
                 )
                 self._handle_silent_audio_chunk()
+
                 self._chunk_activity.pop(res_chunk_id, None)
                 continue
 
