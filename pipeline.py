@@ -6,7 +6,6 @@ import argparse
 
 import contextlib
 import json
-import math
 import os
 import queue
 import shutil
@@ -847,13 +846,12 @@ class ParallelVoiceAssistant:
         self._pending_tts_futures: Set[Future] = set()
 
         self._chunk_activity: Dict[int, bool] = {}
-        self._awaiting_transcript_chunks = 0
-        self._awaiting_transcript_started_at: Optional[float] = None
-        self._awaiting_transcript_chunk_limit = max(2, int(math.ceil(4.0 / max(0.1, self._chunk_duration))))
-        self._awaiting_transcript_timeout = max(3.0, self._chunk_duration * 2.5)
-        self._stt_flush_in_progress = False
-        self._next_finalize_id = 1_000_000
-        self._active_flush_ids: Set[int] = set()
+        self._chunk_energy: Dict[int, Tuple[float, float]] = {}
+        self._finalize_request_id = 1_000_000
+
+        self._noise_floor_rms: Optional[float] = None
+        self._noise_floor_peak: Optional[float] = None
+        self._noise_floor_updates = 0
 
 
 
@@ -866,39 +864,53 @@ class ParallelVoiceAssistant:
             self._last_voice_time = now
         self._activity_event.set()
 
-    def _reset_awaiting_transcript_state(self) -> None:
-        self._awaiting_transcript_chunks = 0
-        self._awaiting_transcript_started_at = None
-
-    def _should_force_intermediate_transcription(self) -> bool:
-        if self._stt_flush_in_progress:
-            return False
-        if self._awaiting_transcript_chunks >= self._awaiting_transcript_chunk_limit:
-            return True
-        if self._awaiting_transcript_started_at is not None:
-            elapsed = time.time() - self._awaiting_transcript_started_at
-            if elapsed >= self._awaiting_transcript_timeout:
-                return True
-        return False
-
-    def _queue_intermediate_transcription(self, reason: str, *, mark_final: bool = False) -> None:
-        if self._stt_flush_in_progress:
-            return
-
-        flush_id = self._next_finalize_id
-        future = self.stt.finalize(flush_id, mark_final=mark_final)
+    def _submit_finalize_request(self, *, mark_final: bool, reason: Optional[str] = None) -> bool:
+        finalize_id = self._finalize_request_id
+        future = self.stt.finalize(finalize_id, mark_final=mark_final)
         if future is None:
-            return
+            return False
 
-        self._stt_flush_in_progress = True
-        self._active_flush_ids.add(flush_id)
-        self.stt_futures.put((flush_id, future, time.time()))
-        print(reason)
-        self._reset_awaiting_transcript_state()
-        self._next_finalize_id += 1
+        if reason:
+            print(reason)
 
-    def _is_silent_chunk(self, audio_chunk: np.ndarray) -> bool:
+        self.stt_futures.put((finalize_id, future, time.time()))
+        self._finalize_request_id += 1
+        return True
+
+    def _update_noise_floor(self, rms: float, peak: float) -> None:
+        rms = max(0.0, float(rms))
+        peak = max(0.0, float(peak))
+
+        if self._noise_floor_rms is None:
+            self._noise_floor_rms = rms
+            self._noise_floor_peak = peak
+        else:
+            alpha = 0.2
+            assert self._noise_floor_peak is not None
+            self._noise_floor_rms = (1.0 - alpha) * self._noise_floor_rms + alpha * rms
+            self._noise_floor_peak = (1.0 - alpha) * self._noise_floor_peak + alpha * peak
+
+        self._noise_floor_updates = min(self._noise_floor_updates + 1, 1_000_000)
+
+    def _noise_thresholds(self) -> Tuple[float, float]:
+        base_rms = self._noise_floor_rms or 0.0
+        base_peak = self._noise_floor_peak if self._noise_floor_peak is not None else base_rms
+
+        safety_rms_margin = max(75.0, self._silence_threshold * 0.5)
+        safety_peak_margin = max(150.0, self._silence_threshold * 0.75)
+
+        rms_threshold = max(self._silence_threshold, base_rms + safety_rms_margin)
+        peak_threshold = max(self._silence_threshold * 1.5, base_peak + safety_peak_margin)
+
+        return rms_threshold, peak_threshold
+
+    def _energy_matches_noise_floor(self, rms: float, peak: float) -> bool:
+        rms_threshold, peak_threshold = self._noise_thresholds()
+        return rms <= rms_threshold and peak <= peak_threshold
+
+    def _is_silent_chunk(self, chunk_id: int, audio_chunk: np.ndarray) -> bool:
         if audio_chunk.size == 0:
+            self._chunk_energy[chunk_id] = (0.0, 0.0)
             return True
 
         audio_view = np.asarray(audio_chunk, dtype=np.int16)
@@ -907,22 +919,28 @@ class ParallelVoiceAssistant:
 
         audio_float = audio_view.astype(np.float32)
         if audio_float.size == 0:
+            self._chunk_energy[chunk_id] = (0.0, 0.0)
             return True
 
         abs_audio = np.abs(audio_float)
         rms = float(np.sqrt(np.mean(np.square(audio_float))))
-        peak = float(abs_audio.max())
+        peak = float(abs_audio.max()) if abs_audio.size else 0.0
 
-        if rms < self._silence_threshold and peak < (self._silence_threshold * 1.5):
+        self._chunk_energy[chunk_id] = (rms, peak)
+
+        rms_threshold, peak_threshold = self._noise_thresholds()
+
+        if rms <= rms_threshold and peak <= peak_threshold:
             return True
 
         # Guard against sporadic spikes being treated as speech by checking how
         # much of the chunk actually carries energy above the threshold.
-        samples_above = float(np.count_nonzero(abs_audio > self._silence_threshold))
+        energy_threshold = rms_threshold
+        samples_above = float(np.count_nonzero(abs_audio > energy_threshold))
         fraction_above = samples_above / float(abs_audio.size)
-        percentile_95 = float(np.percentile(abs_audio, 95))
+        percentile_95 = float(np.percentile(abs_audio, 95)) if abs_audio.size else 0.0
 
-        if fraction_above < 0.01 and percentile_95 < (self._silence_threshold * 1.4):
+        if fraction_above < 0.01 and percentile_95 <= peak_threshold:
             return True
 
         return False
@@ -948,12 +966,12 @@ class ParallelVoiceAssistant:
             return
         self._consecutive_silent_chunks += 1
         if self._consecutive_silent_chunks == self._silent_chunks_before_stop:
-            self._queue_intermediate_transcription(
-                (
+            self._submit_finalize_request(
+                mark_final=True,
+                reason=(
                     f"[STT] Detected {self._consecutive_silent_chunks} "
                     "silent chunks; finalizing pending audio."
                 ),
-                mark_final=True,
             )
         if self._consecutive_silent_chunks < self._silent_chunks_before_stop:
             return
@@ -1008,10 +1026,7 @@ class ParallelVoiceAssistant:
             self._stop_requested = False
             self._stop_reason = None
         self._consecutive_silent_chunks = 0
-        self._reset_awaiting_transcript_state()
-        self._stt_flush_in_progress = False
-        self._active_flush_ids.clear()
-        self._next_finalize_id = 1_000_000
+        self._finalize_request_id = 1_000_000
 
 
         self.recorder.start()
@@ -1069,11 +1084,7 @@ class ParallelVoiceAssistant:
 
         stt_thread.join(timeout=5.0)
 
-        finalize_future = self.stt.finalize(self.stats.stt_chunks + 1)
-        if finalize_future is not None:
-
-            self.stt_futures.put((self.stats.stt_chunks + 1, finalize_future, time.time()))
-
+        if self._submit_finalize_request(mark_final=True):
             self._process_stt_results(wait=True)
 
         # Signal the LLM pipeline that no more text is coming once final STT results are queued.
@@ -1111,20 +1122,17 @@ class ParallelVoiceAssistant:
                 # _handle_silent_audio_chunk() here. We wait for the STT result so we
                 # only count a chunk as "silent" once the model actually returns nothing
                 # useful for that chunk (avoids double-counting).
-                is_silent = self._is_silent_chunk(audio_chunk)
+                is_silent = self._is_silent_chunk(chunk_id, audio_chunk)
                 self._chunk_activity[chunk_id] = not is_silent
                 if is_silent:
                     # don't mark stop here; just log and continue to submit to STT so
                     # the model can confirm whether it's empty/noise
                     # (This prevents short/quiet speech from being mis-classified.)
                     # Optional: print RMS for debugging:
-                    try:
-                        audio_view = np.asarray(audio_chunk, dtype=np.int16)
-                        if audio_view.ndim > 1:
-                            audio_view = audio_view.reshape(-1)
-                        rms = float(np.sqrt(np.mean(np.square(audio_view.astype(np.float32)))))
-                    except Exception:
-                        rms = 0.0
+                    rms = 0.0
+                    energy = self._chunk_energy.get(chunk_id)
+                    if energy is not None:
+                        rms = energy[0]
                     print(f"[STT] Chunk {chunk_id}: low energy (RMS {rms:.1f}), submitting to STT for verification")
                 else:
                     # Defer activity tracking until Whisper confirms actual text for
@@ -1169,12 +1177,6 @@ class ParallelVoiceAssistant:
                 continue
 
             res_chunk_id = result.get("chunk_id", chunk_id)
-            if chunk_id in self._active_flush_ids or res_chunk_id in self._active_flush_ids:
-                self._active_flush_ids.discard(chunk_id)
-                self._active_flush_ids.discard(res_chunk_id)
-                self._stt_flush_in_progress = False
-
-
             latency = max(0.0, time.time() - start_time)
             self.stats.stt_latencies.append(latency)
 
@@ -1184,7 +1186,7 @@ class ParallelVoiceAssistant:
 
             # Normalize for noise checks
             normalized = (text or "").strip().lower()
-            had_activity = self._chunk_activity.pop(res_chunk_id, False)
+            energy = self._chunk_energy.pop(res_chunk_id, None)
 
             # Check blacklist exact matches first, then regex for variants
             is_noise = False
@@ -1194,44 +1196,30 @@ class ParallelVoiceAssistant:
                 elif self._noise_regex.search(normalized):
                     is_noise = True
 
-            if is_noise or not normalized:
-                if had_activity and not normalized:
-                    # Speech energy was observed for this chunk, but Whisper did not
+            treat_as_silence = is_noise or not normalized
 
-                    # return any transcript yet. Treat as ongoing speech for a short
-                    # period, but force an intermediate transcription if it persists.
-
-                    print(
-                        f"[STT] Chunk {res_chunk_id}: (speech detected, awaiting transcription)"
-                    )
-
-                    self._awaiting_transcript_chunks += 1
-                    if self._awaiting_transcript_started_at is None:
-                        self._awaiting_transcript_started_at = time.time()
-                    if self._should_force_intermediate_transcription():
-                        elapsed = 0.0
-                        if self._awaiting_transcript_started_at is not None:
-                            elapsed = time.time() - self._awaiting_transcript_started_at
-                        self._queue_intermediate_transcription(
-                            f"[STT] Forcing intermediate transcription after {elapsed:.1f}s without text"
-                        )
-
-                    continue
-
-                # Treat as silent/noise: increment silent-chunk logic and DO NOT feed to LLM
-                print(f"[STT] Chunk {res_chunk_id}: {text} (treated as noise/empty)")
-                self._reset_awaiting_transcript_state()
+            if treat_as_silence:
+                display_text = text if text else "[silence]"
+                noise_suffix = ""
+                if energy is not None:
+                    noise_suffix = f" (RMS {energy[0]:.1f})"
+                    if self._energy_matches_noise_floor(*energy):
+                        self._update_noise_floor(*energy)
+                self._chunk_activity[res_chunk_id] = False
+                print(
+                    f"[STT] Chunk {res_chunk_id}: {display_text} (treated as silence){noise_suffix}"
+                )
                 self._handle_silent_audio_chunk()
-                # We still want to surface the log, but skip registering activity and LLM trigger
-                # continue to next future
+                self._chunk_activity.pop(res_chunk_id, None)
                 continue
 
             # Otherwise it's valid speech
-            self._reset_awaiting_transcript_state()
             self._register_activity()
             self._consecutive_silent_chunks = 0
 
             print(f"[STT] Chunk {res_chunk_id}: {text}")
+
+            self._chunk_activity.pop(res_chunk_id, None)
 
 
 
