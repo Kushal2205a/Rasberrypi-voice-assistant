@@ -231,14 +231,65 @@ class ParallelSTT:
         finally:
             wav_path.unlink(missing_ok=True)
 
-        new_text = full_text
-        if emitted and full_text.lower().startswith(emitted.lower()):
-            new_text = full_text[len(emitted) :].strip()
+        new_text = self._extract_new_text(full_text, emitted)
 
         with self._transcript_lock:
             self._emitted_transcript = full_text
 
         return {"chunk_id": chunk_id, "text": new_text, "is_final": mark_final}
+
+    @staticmethod
+    def _tokenize_with_spans(text: str) -> List[Tuple[str, int, int]]:
+        pattern = re.compile(r"\w+|[^\w\s]", flags=re.UNICODE)
+        return [(match.group(), match.start(), match.end()) for match in pattern.finditer(text or "")]
+
+    @staticmethod
+    def _normalize_token(token: str) -> str:
+        return re.sub(r"[^\w]+", "", token or "").lower()
+
+    @classmethod
+    def _extract_new_text(cls, full_text: str, emitted: str) -> str:
+        full_text = (full_text or "").strip()
+        emitted = (emitted or "").strip()
+
+        if not full_text:
+            return ""
+        if not emitted:
+            return full_text
+
+        full_tokens = cls._tokenize_with_spans(full_text)
+        emitted_tokens = cls._tokenize_with_spans(emitted)
+
+        i = j = 0
+        while i < len(emitted_tokens) and j < len(full_tokens):
+            emitted_token, _, _ = emitted_tokens[i]
+            full_token, _, _ = full_tokens[j]
+
+            emitted_norm = cls._normalize_token(emitted_token)
+            full_norm = cls._normalize_token(full_token)
+
+            if emitted_norm and emitted_norm == full_norm:
+                i += 1
+                j += 1
+                continue
+
+            if not emitted_norm and emitted_token == full_token:
+                i += 1
+                j += 1
+                continue
+
+            # Allow matching punctuation that may have shifted position, e.g.,
+            # "sir." -> "sir name.". In that case we stop before the differing token.
+            break
+
+        if j >= len(full_tokens):
+            return ""
+
+        start_index = full_tokens[j][1]
+        remainder = full_text[start_index:].lstrip()
+        if not re.search(r"\w", remainder):
+            return ""
+        return remainder
 
     def _empty_chunk(self, chunk_id: int) -> Dict[str, Any]:
         return {"chunk_id": chunk_id, "text": "", "is_final": False}
@@ -833,13 +884,16 @@ class ParallelVoiceAssistant:
             "blank_audio",
             "blank audio",
             "[blank_audio]",
+            "[silence]",
+            "(silence)",
             "(wind blowing)",
             "(bird chirping)",
         }
 
         # optional: regex to catch bracket/parenthesis or small variations
         self._noise_regex = re.compile(
-            r"\b(blank[_ ]?audio|wind blowing|bird chirping)\b", flags=re.IGNORECASE
+            r"\b(blank[_ ]?audio|wind blowing|bird chirping|\[silence\]|\(silence\))\b",
+            flags=re.IGNORECASE,
         )
 
         self._tts_futures_lock = threading.Lock()
@@ -847,6 +901,7 @@ class ParallelVoiceAssistant:
 
         self._chunk_activity: Dict[int, bool] = {}
         self._chunk_energy: Dict[int, Tuple[float, float]] = {}
+        self._chunk_timestamps: Dict[int, float] = {}
 
         self._finalize_request_id = 1_000_000
 
@@ -861,13 +916,15 @@ class ParallelVoiceAssistant:
 
 
 
-    def _register_activity(self) -> None:
-        now = time.time()
+    def _register_activity(self, event_time: Optional[float] = None) -> None:
+        timestamp = float(event_time) if event_time is not None else time.time()
         with self._activity_lock:
             if not self._has_detected_speech:
-                self._first_voice_time = now
+                self._first_voice_time = timestamp
+            else:
+                timestamp = max(timestamp, self._last_voice_time)
             self._has_detected_speech = True
-            self._last_voice_time = now
+            self._last_voice_time = timestamp
         self._activity_event.set()
 
     def _submit_finalize_request(self, *, mark_final: bool, reason: Optional[str] = None) -> bool:
@@ -879,6 +936,8 @@ class ParallelVoiceAssistant:
         if reason:
             print(reason)
 
+        reference_time = self._recording_stop_time if self._recording_stop_time is not None else time.time()
+        self._chunk_timestamps[finalize_id] = reference_time
         self.stt_futures.put((finalize_id, future, time.time()))
         self._finalize_request_id += 1
         return True
@@ -1034,6 +1093,9 @@ class ParallelVoiceAssistant:
             self._stop_reason = None
         self._consecutive_silent_chunks = 0
         self._finalize_request_id = 1_000_000
+        self._chunk_activity.clear()
+        self._chunk_energy.clear()
+        self._chunk_timestamps.clear()
 
 
         self.recorder.start()
@@ -1122,6 +1184,11 @@ class ParallelVoiceAssistant:
                     self._process_stt_results(wait=False)
                     break
 
+                if self._stop_requested:
+                    self.recorder.clear_queue()
+                    self._process_stt_results(wait=False)
+                    break
+
                 # remember recorder sample rate for VAD logic if needed
                 setattr(self, "_recorder_sample_rate", self.recorder.sample_rate)
 
@@ -1149,6 +1216,9 @@ class ParallelVoiceAssistant:
 
                 # Submit to STT as usual (we rely on _process_stt_results to treat
                 # empty/noise transcriptions as silent and call _handle_silent_audio_chunk()).
+                chunk_timestamp = time.time()
+                self._chunk_timestamps[chunk_id] = chunk_timestamp
+
                 future = self.stt.submit_chunk(audio_chunk, chunk_id)
                 self.stt_futures.put((chunk_id, future, time.time()))
 
@@ -1173,6 +1243,9 @@ class ParallelVoiceAssistant:
                     result = future.result()
                 except Exception as exc:
                     print(f"[STT Pipeline] Future for chunk {chunk_id} failed: {exc}")
+                    self._chunk_timestamps.pop(chunk_id, None)
+                    self._chunk_activity.pop(chunk_id, None)
+                    self._chunk_energy.pop(chunk_id, None)
                     continue
             else:
 
@@ -1181,9 +1254,12 @@ class ParallelVoiceAssistant:
                 continue
 
             if not result:
+                self._chunk_timestamps.pop(chunk_id, None)
+                self._chunk_energy.pop(chunk_id, None)
                 continue
 
             res_chunk_id = result.get("chunk_id", chunk_id)
+            chunk_timestamp = self._chunk_timestamps.pop(res_chunk_id, None)
             latency = max(0.0, time.time() - start_time)
             self.stats.stt_latencies.append(latency)
 
@@ -1203,9 +1279,39 @@ class ParallelVoiceAssistant:
                     is_noise = True
                 elif self._noise_regex.search(normalized):
                     is_noise = True
+                elif normalized.strip() == "silence":
+                    is_noise = True
 
 
             treat_as_silence = is_noise or not normalized
+
+            prior_activity = self._chunk_activity.get(res_chunk_id, False)
+            had_discernible_energy = bool(
+                energy is not None and not self._energy_matches_noise_floor(*energy)
+            )
+
+            placeholder_empty_chunk = (
+                treat_as_silence
+                and not normalized
+                and prior_activity
+                and not self.stt.emit_partials
+                and had_discernible_energy
+            )
+
+            if placeholder_empty_chunk:
+                noise_suffix = ""
+                if energy is not None:
+                    noise_suffix = f" (RMS {energy[0]:.1f})"
+                print(
+                    f"[STT] Chunk {res_chunk_id}: [placeholder]{noise_suffix} "
+                    "(awaiting final transcription)"
+                )
+                # Treat the audio as activity so the silence timer reflects the
+                # recording time of the chunk rather than when Whisper finishes.
+                self._register_activity(chunk_timestamp)
+                self._consecutive_silent_chunks = 0
+                self._chunk_activity.pop(res_chunk_id, None)
+                continue
 
             if treat_as_silence:
                 display_text = text if text else "[silence]"
@@ -1224,7 +1330,7 @@ class ParallelVoiceAssistant:
                 continue
 
             # Otherwise it's valid speech
-            self._register_activity()
+            self._register_activity(chunk_timestamp)
             self._consecutive_silent_chunks = 0
 
             print(f"[STT] Chunk {res_chunk_id}: {text}")
@@ -1400,7 +1506,8 @@ class ParallelVoiceAssistant:
         current: List[str] = []
         for word in text.split():
             current.append(word)
-            if any(word.endswith(p) for p in [".", "!", "?", ","]):
+            stripped = word.rstrip("\"')]}”’`")
+            if any(stripped.endswith(p) for p in [".", "!", "?"]):
                 sentences.append(" ".join(current))
                 current = []
         if current:
