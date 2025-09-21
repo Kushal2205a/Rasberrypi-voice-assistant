@@ -1306,11 +1306,13 @@ class ParallelVoiceAssistant:
                     f"[STT] Chunk {res_chunk_id}: [placeholder]{noise_suffix} "
                     "(awaiting final transcription)"
                 )
+
                 # Treat the audio as activity so the silence timer reflects the
                 # recording time of the chunk rather than when Whisper finishes.
                 self._register_activity(chunk_timestamp)
                 self._consecutive_silent_chunks = 0
                 self._chunk_activity.pop(res_chunk_id, None)
+
                 continue
 
             if treat_as_silence:
