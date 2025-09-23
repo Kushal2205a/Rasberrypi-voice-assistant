@@ -679,17 +679,24 @@ class ParallelSTT:
         if not chunks:
             return {"chunk_id": chunk_id, "text": "", "is_final": True}
 
+        audio_bytes = b"".join(chunks)
+        total_bytes = len(audio_bytes)
+        approx_seconds = total_bytes / max(1, self.sample_rate * 2)
+        adaptive_timeout = max(10, min(45, int(math.ceil(max(approx_seconds, 0.5) * 6))))
+
         full_text = ""
         if self._warm_worker is not None:
             try:
-                full_text = (self._warm_worker.finalize(b"".join(chunks)) or "").strip()
+                full_text = (self._warm_worker.finalize(audio_bytes) or "").strip()
             except Exception as exc:
                 print(f"[STT][Whisper] Warm worker finalize failed: {exc}")
                 full_text = ""
         else:
-            wav_path = self._write_wav(b"".join(chunks), f"session{chunk_id}")
+            wav_path = self._write_wav(audio_bytes, f"session{chunk_id}")
             try:
-                full_text = (self._run_whisper(wav_path, timeout=120) or "").strip()
+                full_text = (
+                    self._run_whisper(wav_path, timeout=adaptive_timeout) or ""
+                ).strip()
             finally:
                 wav_path.unlink(missing_ok=True)
 
@@ -763,6 +770,14 @@ class ParallelSTT:
         return self.executor.submit(self._finalize_whisper, chunk_id, mark_final)
 
     def reset(self) -> None:
+        with self._transcript_lock:
+            self._chunks.clear()
+            self._emitted_transcript = ""
+            self._last_partial = ""
+        if self._warm_worker is not None:
+            self._warm_worker.reset()
+
+    def discard_cached_audio(self) -> None:
         with self._transcript_lock:
             self._chunks.clear()
             self._emitted_transcript = ""
@@ -1799,7 +1814,16 @@ class ParallelVoiceAssistant:
 
         stt_thread.join(timeout=5.0)
 
-        finalize_future = self.stt.finalize(self.stats.stt_chunks + 1)
+        self._process_stt_results(wait=False)
+
+        finalize_future: Optional[Future]
+        if self._has_detected_speech:
+            finalize_future = self.stt.finalize(self.stats.stt_chunks + 1)
+        else:
+            finalize_future = None
+            self.stt.discard_cached_audio()
+            print("[STT] Skipping final transcription because no speech was detected.")
+
         if finalize_future is not None:
             final_chunk_id = self.stats.stt_chunks + 1
             self.stt_futures.put((final_chunk_id, finalize_future, time.time()))
@@ -1945,13 +1969,21 @@ class ParallelVoiceAssistant:
             if is_noise or not normalized:
                 if had_activity and not normalized:
                     # Speech energy was observed for this chunk, but Whisper did not
-
                     # return any transcript yet. Treat as ongoing speech for a short
                     # period, but force an intermediate transcription if it persists.
 
                     print(
                         f"[STT] Chunk {res_chunk_id}: (speech detected, awaiting transcription)"
                     )
+
+                    if not getattr(self.stt, "emit_partials", False):
+                        # When partials are disabled we depend entirely on finalize().
+                        # Trigger a transcription pass immediately so we do not wait
+                        # for additional chunks or the global duration limit.
+                        self._queue_intermediate_transcription(
+                            "[STT] Forcing transcription because partials are disabled"
+                        )
+                        continue
 
                     self._awaiting_transcript_chunks += 1
                     if self._awaiting_transcript_started_at is None:
