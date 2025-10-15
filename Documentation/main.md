@@ -95,3 +95,23 @@ When `main()` constructs `ParallelVoiceAssistant`, execution moves into `pipelin
       --temperature 0.6
 
 This keeps everything local with Faster-Whisper for STT, llama.cpp for the LLM, and eSpeak for TTS.
+
+## History & Benchmarks
+
+### Past models & performance  
+- **whisper.cpp (tiny / base models)** — used originally for STT; results: ~10 s latency on Pi 4, memory use ~500 MB.  
+  Repository: [whisper.cpp](https://github.com/ggerganov/whisper.cpp)  
+- **Other GGUF models (e.g. 7B variants, etc.)** — tested but too heavy for local deployment, memory > 4 GB  
+
+### Past STT / TTS tools & metrics  
+- **Whisper CLI (whisper.cpp)** for STT — average latency ~10 seconds on my test phrases  
+- **Piper TTS** — added ~2-3 s extra overhead (so I disabled it for now)  
+  Repository: [Piper TTS](https://github.com/rhasspy/piper)  
+- **eSpeak** — currently used; adds minimal latency (<0.2 s)  
+  Project page: [eSpeak](http://espeak.sourceforge.net)  
+
+### Hardware tested  
+- **Raspberry Pi 4 (8 GB)** — main development target   
+  Product info: [Raspberry Pi 5](https://www.raspberrypi.com/products/raspberry-pi-5/)  
+
+
