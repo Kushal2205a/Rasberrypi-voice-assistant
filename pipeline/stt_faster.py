@@ -3,7 +3,13 @@ from typing import Optional, Any, Dict, List
 from concurrent.futures import Future, ThreadPoolExecutor
 import threading, time, os
 import numpy as np
-import audioop
+import math
+try:
+    from scipy.signal import resample_poly  # optional, faster/better if SciPy is installed
+    _HAVE_SCIPY = True
+except Exception:
+    _HAVE_SCIPY = False
+
 
 # Silence ORT warnings early (must be set before import)
 os.environ.setdefault("ORT_LOG_SEVERITY_LEVEL", "3")
@@ -102,18 +108,32 @@ class PersistentWhisperSTT:
         return self.executor.submit(lambda cid=chunk_id: {"chunk_id": cid, "text": "", "is_final": False})
 
     
-    def _pcm_bytes_to_float32(audio_bytes: bytes) -> np.ndarray:
-        if self.sample_rate != self._target_sr:
-            audio_bytes, _ = audioop.ratecv(
-                audio_bytes,
-                2,      # 16-bit
-                1,      # mono
-                self.sample_rate,
-                self._target_sr,
-                None
-            )
-        pcm16 = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
-        return pcm16 / 32768.0
+    def _pcm_bytes_to_float32(self, audio_bytes: bytes) -> np.ndarray:
+        if not audio_bytes:
+            return np.zeros(0, dtype=np.float32)
+
+        src = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)  # [-32768,32767]
+
+        if self.sample_rate == self._target_sr:
+            return src / 32768.0
+
+        ratio = self._target_sr / float(self.sample_rate)
+
+        if _HAVE_SCIPY:
+    
+            g = math.gcd(self.sample_rate, self._target_sr)
+            up, down = self._target_sr // g, self.sample_rate // g
+            dst = resample_poly(src, up, down)
+        else:
+            
+            x = np.arange(src.shape[0], dtype=np.float32)
+            xi = np.arange(0, src.shape[0], 1.0 / ratio, dtype=np.float32)
+            if xi.size == 0:
+                return np.zeros(0, dtype=np.float32)
+            dst = np.interp(xi, x, src)
+
+        return (dst / 32768.0).astype(np.float32)
+
 
     def _transcribe(self, pcm: np.ndarray) -> str:
         segs, _info = self.model.transcribe(
