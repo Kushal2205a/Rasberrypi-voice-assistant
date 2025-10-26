@@ -2,7 +2,7 @@ from pathlib import Path
 
 PROJECT_DIR = Path.cwd()
 RECORDED_WAV = PROJECT_DIR / "recorded.wav"
-SAMPLE_RATE =  16000
+SAMPLE_RATE =  44100
 
 
 CHUNK_DURATION =  0.5
