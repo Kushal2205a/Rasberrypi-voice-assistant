@@ -32,7 +32,7 @@ class StreamingRecorder:
 
     def _record_loop(self) -> None:
         chunk_samples = int(self.chunk_duration * self.sample_rate)
-        with sd.InputStream(samplerate=self.sample_rate, channels=1, dtype="int16") as stream:
+        with sd.InputStream(device=1,samplerate=self.sample_rate, channels=1, dtype="int16") as stream:
             while self.recording:
                 audio_chunk, _ = stream.read(chunk_samples)
                 # Copy to detach from PortAudio's buffers
