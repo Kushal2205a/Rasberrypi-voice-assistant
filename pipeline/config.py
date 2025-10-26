@@ -7,7 +7,7 @@ SAMPLE_RATE = 16000
 CHUNK_DURATION =  0.5
 
 DEFAULT_SILENCE_TIMEOUT = 1.5  # seconds of inactivity before auto-stopping
-DEFAULT_SILENCE_THRESHOLD = 1300.0  # RMS amplitude threshold for silence detection
+DEFAULT_SILENCE_THRESHOLD = 600.0  # RMS amplitude threshold for silence detection
 
 WHISPER_EXE = Path.home() / "whisper.cpp" / "build" / "bin" / "whisper-cli"
 WHISPER_MODEL = Path.home() / "whisper.cpp" / "models" / "ggml-tiny.bin"\
