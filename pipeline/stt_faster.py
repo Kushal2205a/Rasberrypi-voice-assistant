@@ -3,6 +3,7 @@ from typing import Optional, Any, Dict, List
 from concurrent.futures import Future, ThreadPoolExecutor
 import threading, time, os
 import numpy as np
+import audioop
 
 # Silence ORT warnings early (must be set before import)
 os.environ.setdefault("ORT_LOG_SEVERITY_LEVEL", "3")
@@ -54,6 +55,8 @@ class PersistentWhisperSTT:
         self.emit_partials = bool(emit_partials)
         self.language = language
         self.use_vad = use_vad
+        self.sample_rate = int(sample_rate)   # recorder/mic rate (e.g., 44100)
+        self._target_sr = 16000               # Whisper expects 16 kHz
 
         # Load once
         def _get_shared_model(model_name: str, compute_type: str):
@@ -70,7 +73,7 @@ class PersistentWhisperSTT:
 
 
         # Rolling buffers + state
-        self._window_bytes = int(self.sample_rate * 2 * (window_ms / 1000.0))
+        self._window_bytes = int(self._target_sr * 2 * (window_ms / 1000.0))
         self._rolling = bytearray()
         self._chunks: List[bytes] = []
         self._lock = threading.Lock()
@@ -98,8 +101,17 @@ class PersistentWhisperSTT:
     def empty_future(self, chunk_id: int) -> Future:
         return self.executor.submit(lambda cid=chunk_id: {"chunk_id": cid, "text": "", "is_final": False})
 
-    @staticmethod
+    
     def _pcm_bytes_to_float32(audio_bytes: bytes) -> np.ndarray:
+        if self.sample_rate != self._target_sr:
+            audio_bytes, _ = audioop.ratecv(
+                audio_bytes,
+                2,      # 16-bit
+                1,      # mono
+                self.sample_rate,
+                self._target_sr,
+                None
+            )
         pcm16 = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
         return pcm16 / 32768.0
 
@@ -123,7 +135,7 @@ class PersistentWhisperSTT:
                 window = bytes(self._rolling)
 
             # Ensure at least ~200 ms so early words aren't dropped
-            min_bytes = int(self.sample_rate * 2 * 0.2)
+            min_bytes = int(self._target_sr * 2 * 0.2)
             if len(window) < min_bytes:
                 window = window + b"\x00" * (min_bytes - len(window))
 
