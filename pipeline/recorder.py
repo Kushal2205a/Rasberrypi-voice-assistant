@@ -89,7 +89,8 @@ class StreamingRecorder:
         self._thread: Optional[threading.Thread] = None
 
         self.use_vad = True
-        self.vad = VADGate(aggressiveness=2, trigger_ms=80, release_ms=240) if _HAVE_VAD else None
+        self.vad = VADGate(aggressiveness=1, trigger_ms=120, release_ms=420) if _HAVE_VAD else None
+
 
 
     def start(self) -> None:

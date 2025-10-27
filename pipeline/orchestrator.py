@@ -149,7 +149,7 @@ class ParallelVoiceAssistant:
         self._pending_tts_futures: Set[Future] = set()
         
         try:
-            self.vad = VADGate(aggressiveness=2, trigger_ms=80, release_ms=240)
+            self.vad = VADGate(aggressiveness=1, trigger_ms=120, release_ms=420)
             self._use_vad = True
         except Exception:
             self.vad = None
@@ -401,30 +401,29 @@ class ParallelVoiceAssistant:
                 
                 if getattr(self, "_use_vad", False) and self.vad:
                     pcm_bytes = np.ascontiguousarray(audio_chunk, dtype=np.int16).tobytes()
+                    pending_vad_stop = False
                     events = self.vad.push_pcm16_44k1(pcm_bytes) or []
                     for ev in events:
                         if ev[0] == "voice_start":
-                            # treat immediately as speech activity
                             self._register_activity()
                         elif ev[0] == "voice_end":
-                            
                             if not self._stt_flush_in_progress:
                                 self._queue_intermediate_transcription("[VAD] voice_end -> flushing buffered speech")
-                            self._request_stop("[MAIN] VAD detected end of speech; stopping recorder.")
-                
-                    is_silent = not self.vad.active
+                            pending_vad_stop = True
+                    
+                        is_silent = not self.vad.active
                 else:
                     
                     is_silent = self._is_silent_chunk(audio_chunk)
                 
                 self._chunk_activity[chunk_id] = not is_silent
 
-               
+                future = (self.stt.submit_chunk(audio_chunk, chunk_id))
+                if pending_vad_stop:
+                    self._request_stop("[MAIN] VAD detected end of speech; stopping recorder.")
+
                 if not is_silent:
                     self._register_activity()
-                    future = (self.stt.submit_chunk(audio_chunk, chunk_id))
-                else:
-                    future = self.stt.empty_future(chunk_id)
                 self.stt_futures.put((chunk_id, future, time.time()))
                 self.stats.stt_chunks += 1
                 chunk_id += 1

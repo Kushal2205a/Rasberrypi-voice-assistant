@@ -48,8 +48,8 @@ class PersistentWhisperSTT:
         # faster-whisper params:
         model_name: str = "tiny.en",    # English-only gives a slight speed win
         compute_type: str = "int8",     # good on Pi 4
-        window_ms: int = 1200,          # rolling window size for partials
-        min_partial_interval_ms: int = 350,  # throttle partial frequency
+        window_ms: int = 1600,          # rolling window size for partials
+        min_partial_interval_ms: int = 300,  # throttle partial frequency
         language: Optional[str] = "en",
         use_vad: bool = False,          # VAD adds overhead on Pi; keep off for partials
     ) -> None:
