@@ -4,7 +4,7 @@ from typing import Optional, Any, Iterable, Dict, List, Deque, Tuple, Set
 from collections import deque
 from concurrent.futures import Future
 import time 
-
+from recorder import VADGate
 import os, threading, queue, re, math, psutil, numpy as np 
 
 from config import CHUNK_DURATION, SAMPLE_RATE, WHISPER_EXE, WHISPER_MODEL, PIPER_MODEL_PATH, DEFAULT_SILENCE_THRESHOLD, DEFAULT_SILENCE_TIMEOUT
@@ -147,6 +147,13 @@ class ParallelVoiceAssistant:
 
         self._tts_futures_lock = threading.Lock()
         self._pending_tts_futures: Set[Future] = set()
+        
+        try:
+            self.vad = VADGate(aggressiveness=2, trigger_ms=80, release_ms=240)
+            self._use_vad = True
+        except Exception:
+            self.vad = None
+            self._use_vad = False
 
         self._chunk_activity: Dict[int, bool] = {}
         self._awaiting_transcript_chunks = 0
@@ -317,12 +324,10 @@ class ParallelVoiceAssistant:
                     has_voice = self._has_detected_speech
                     last_voice = self._last_voice_time
 
-                if has_voice and (now - last_voice) >= self._silence_timeout:
-
+                if (not getattr(self, "_use_vad", False)) and has_voice and (now - last_voice) >= self._silence_timeout:
                     self._request_stop(
                         f"[MAIN] Detected {self._silence_timeout:.1f}s of silence; stopping recorder."
                     )
-
                     break
 
                 wait_timeout = 0.5
@@ -393,10 +398,27 @@ class ParallelVoiceAssistant:
 
                 # remember recorder sample rate for VAD logic if needed
                 setattr(self, "_recorder_sample_rate", self.recorder.sample_rate)
-
                 
-                is_silent = self._is_silent_chunk(audio_chunk)
+                if getattr(self, "_use_vad", False) and self.vad:
+                    pcm_bytes = np.ascontiguousarray(audio_chunk, dtype=np.int16).tobytes()
+                    events = self.vad.push_pcm16_44k1(pcm_bytes) or []
+                    for ev in events:
+                        if ev[0] == "voice_start":
+                            # treat immediately as speech activity
+                            self._register_activity()
+                        elif ev[0] == "voice_end":
+                            
+                            if not self._stt_flush_in_progress:
+                                self._queue_intermediate_transcription("[VAD] voice_end -> flushing buffered speech")
+                            self._request_stop("[MAIN] VAD detected end of speech; stopping recorder.")
+                
+                    is_silent = not self.vad.active
+                else:
+                    
+                    is_silent = self._is_silent_chunk(audio_chunk)
+                
                 self._chunk_activity[chunk_id] = not is_silent
+
                
                 if not is_silent:
                     self._register_activity()
