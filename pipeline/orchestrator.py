@@ -149,7 +149,7 @@ class ParallelVoiceAssistant:
         self._pending_tts_futures: Set[Future] = set()
         
         try:
-            self.vad = VADGate(aggressiveness=1, trigger_ms=120, release_ms=420)
+            self.vad = VADGate(aggressiveness=1, trigger_ms=120, release_ms=460)
             self._use_vad = True
         except Exception:
             self.vad = None
@@ -158,8 +158,9 @@ class ParallelVoiceAssistant:
         self._chunk_activity: Dict[int, bool] = {}
         self._awaiting_transcript_chunks = 0
         self._awaiting_transcript_started_at: Optional[float] = None
-        self._awaiting_transcript_chunk_limit = max(2, int(math.ceil(1.0 / max(0.1, self._chunk_duration))))
-        self._awaiting_transcript_timeout = max(0.5, self._chunk_duration * 1.0)
+        self._awaiting_transcript_chunk_limit = max(5, int(math.ceil(2.5 / max(0.1, self._chunk_duration))))
+        self._awaiting_transcript_timeout = max(1.5, self._chunk_duration * 3.0)
+
         self._stt_flush_in_progress = False
         self._next_finalize_id = 1_000_000
         self._active_flush_ids: Set[int] = set()
@@ -353,14 +354,11 @@ class ParallelVoiceAssistant:
 
         # Decide whether to run a final STT pass
         finalize_future = None
-        recent_voice = False
-        if self.stats.stt_chunks > 0:
-            with self._activity_lock:
-                if self._last_voice_time:
-                    recent_voice = (time.time() - self._last_voice_time) < 1.0
-
-        if not recent_voice:
+        need_finalize = self.stats.stt_chunks > 0
+        # With VAD we ALWAYS want a full-pass decode to catch trailing words.
+        if need_finalize:
             finalize_future = self.stt.finalize(self.stats.stt_chunks + 1)
+
 
         if finalize_future is not None:
             self.stt_futures.put((self.stats.stt_chunks + 1, finalize_future, time.time()))
