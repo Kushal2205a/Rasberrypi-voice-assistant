@@ -196,6 +196,9 @@ class StreamingLLM:
         self.llama_kwargs.setdefault("threads", os.cpu_count() or 4)
         self.llama_kwargs.setdefault("temperature", 0.6)
         self._closed = False
+        self.final_only = False
+        self.min_final_words = 2
+
 
     def process_incremental(self, text_chunk: str, is_final: bool = False) -> Optional[Future]:
         if getattr(self, "_closed", False):
@@ -210,6 +213,17 @@ class StreamingLLM:
         should_generate = False
         if is_final:
             should_generate = bool(self.context_buffer)
+            joined = " ".join(self.context_buffer).strip()
+            if joined:
+                if len(joined.split()) >= getattr(self, "min_final_words", 2):
+                    should_generate = True
+                else:
+                    # too short: clear and skip this final
+                    self.context_buffer.clear()
+                    return None
+        elif getattr(self, "final_only", False):
+            # When partials are enabled, only generate on final
+            should_generate = False
         elif self._should_respond():
             should_generate = True
 
@@ -224,6 +238,8 @@ class StreamingLLM:
         return self.executor.submit(self._generate_response, prompt_text)
 
     def _should_respond(self) -> bool:
+        if getattr(self, "final_only", False):
+            return False
         current = " ".join(self.context_buffer)
         if any(marker in current for marker in [".", "?", "!"]):
             return True

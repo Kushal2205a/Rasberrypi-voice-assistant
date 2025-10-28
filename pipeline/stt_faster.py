@@ -48,8 +48,8 @@ class PersistentWhisperSTT:
         # faster-whisper params:
         model_name: str = "tiny.en",    # English-only gives a slight speed win
         compute_type: str = "int8",     # good on Pi 4
-        window_ms: int = 2400,          # rolling window size for partials
-        min_partial_interval_ms: int = 350,  # throttle partial frequency
+        window_ms: int = 1900,          # rolling window size for partials
+        min_partial_interval_ms: int = 300,  # throttle partial frequency
         language: Optional[str] = "en",
         use_vad: bool = False,          # VAD adds overhead on Pi; keep off for partials
     ) -> None:
@@ -89,8 +89,32 @@ class PersistentWhisperSTT:
         self._last_partial_time = 0.0
         self._min_partial_interval = min_partial_interval_ms / 1000.0
         self._last_emitted_text = ""
+        self._committed_text = ""
 
     # ---------- helpers ----------
+    
+    
+    
+    @staticmethod
+    def _merge_overlap(committed: str, new_text: str, max_overlap_words: int = 8) -> str:
+        c = " ".join((committed or "").split())
+        n = " ".join((new_text or "").split())
+        if not c:
+            return n
+        if not n:
+            return c
+        c_words = c.split()
+        n_words = n.split()
+        max_ov = min(max_overlap_words, len(c_words), len(n_words))
+        for k in range(max_ov, 0, -1):
+            if c_words[-k:] == n_words[:k]:
+                return " ".join(c_words + n_words[k:])
+        # if no overlap but n starts with c, prefer n (window grew)
+        if n.startswith(c):
+            return n
+        # otherwise, append with a space
+        return c + " " + n
+
     
     def _get_shared_model(model_name: str, compute_type: str):
         global _SHARED_MODEL
@@ -167,6 +191,7 @@ class PersistentWhisperSTT:
                 if text and text != self._last_emitted_text:
                     emit = text
                     self._last_emitted_text = text
+                    self._committed_text = self._merge_overlap(self._committed_text, emit)
                 self._last_partial_time = time.time()
         finally:
             with self._lock:
@@ -180,14 +205,35 @@ class PersistentWhisperSTT:
             # reset rolling + chunks for next turn
             self._rolling.clear()
             self._chunks.clear()
+            last_partial = self._last_emitted_text
+            committed = self._committed_text
+            # reset partial state
             self._last_emitted_text = ""
+            self._committed_text = ""
             self._inflight = False
 
         if not full_pcm:
             return {"chunk_id": chunk_id, "text": "", "is_final": True}
 
-        text = self._transcribe(self._pcm_bytes_to_float32(full_pcm))
+        # D: decode just the last ~3.0s to finish the utterance tail quickly
+        tail_seconds = 3.0
+        tail_bytes = int(self._target_sr * 2 * tail_seconds)
+        tail_pcm = full_pcm[-tail_bytes:] if len(full_pcm) > tail_bytes else full_pcm
+
+        tail_text = self._transcribe(self._pcm_bytes_to_float32(tail_pcm))
+
+        # Merge with whatever we had committed from partials
+        if committed:
+            text = self._merge_overlap(committed, tail_text)
+        else:
+            # No committed partials? Fallback to decoding entire audio once.
+            if tail_pcm is full_pcm:
+                text = tail_text
+            else:
+                text = self._transcribe(self._pcm_bytes_to_float32(full_pcm))
+
         return {"chunk_id": chunk_id, "text": text, "is_final": mark_final}
+
 
     # ---------- public API ----------
     def submit_chunk(self, audio_chunk: np.ndarray, chunk_id: int) -> Future:
@@ -225,6 +271,7 @@ class PersistentWhisperSTT:
             self._chunks.clear()
             self._rolling.clear()
             self._last_emitted_text = ""
+            self._committed_text = ""
             self._inflight = False
             self._last_partial_time = 0.0
 

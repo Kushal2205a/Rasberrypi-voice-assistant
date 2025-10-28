@@ -96,6 +96,8 @@ class ParallelVoiceAssistant:
                 emit_partials=emit_stt_partials,
             )
         self.llm = StreamingLLM(llama_kwargs=llama_kwargs)
+        self.llm.final_only = bool(emit_stt_partials)
+
         
         """self.tts = BufferedTTS(
             model_path=piper_model_path,
@@ -149,7 +151,7 @@ class ParallelVoiceAssistant:
         self._pending_tts_futures: Set[Future] = set()
         
         try:
-            self.vad = VADGate(aggressiveness=1, trigger_ms=120, release_ms=460)
+            self.vad = VADGate(aggressiveness=1, trigger_ms=120, release_ms=540)
             self._use_vad = True
         except Exception:
             self.vad = None
@@ -185,6 +187,9 @@ class ParallelVoiceAssistant:
         self._awaiting_transcript_started_at = None
 
     def _should_force_intermediate_transcription(self) -> bool:
+        # With VAD, avoid mid-utterance flushes that fragment results
+        if getattr(self, "_use_vad", False):
+            return False
         if self._stt_flush_in_progress:
             return False
         if self._awaiting_transcript_chunks >= self._awaiting_transcript_chunk_limit:
@@ -194,6 +199,7 @@ class ParallelVoiceAssistant:
             if elapsed >= self._awaiting_transcript_timeout:
                 return True
         return False
+
 
     def _queue_intermediate_transcription(self, reason: str) -> None:
         if self._stt_flush_in_progress:
@@ -394,12 +400,14 @@ class ParallelVoiceAssistant:
                     self._process_stt_results(wait=False)
                     break
 
-                # remember recorder sample rate for VAD logic if needed
+                    
                 setattr(self, "_recorder_sample_rate", self.recorder.sample_rate)
+                
+                pending_vad_stop = False   
+                is_silent = True  
                 
                 if getattr(self, "_use_vad", False) and self.vad:
                     pcm_bytes = np.ascontiguousarray(audio_chunk, dtype=np.int16).tobytes()
-                    pending_vad_stop = False
                     events = self.vad.push_pcm16_44k1(pcm_bytes) or []
                     for ev in events:
                         if ev[0] == "voice_start":
@@ -408,16 +416,17 @@ class ParallelVoiceAssistant:
                             if not self._stt_flush_in_progress:
                                 self._queue_intermediate_transcription("[VAD] voice_end -> flushing buffered speech")
                             pending_vad_stop = True
-                    
-                        is_silent = not self.vad.active
+                
+                    is_silent = not self.vad.active
                 else:
-                    
+                  
                     is_silent = self._is_silent_chunk(audio_chunk)
                 
                 self._chunk_activity[chunk_id] = not is_silent
 
-                future = (self.stt.submit_chunk(audio_chunk, chunk_id))
+                future = self.stt.submit_chunk(audio_chunk, chunk_id)
                 if pending_vad_stop:
+                    time.sleep(0.18)
                     self._request_stop("[MAIN] VAD detected end of speech; stopping recorder.")
 
                 if not is_silent:
