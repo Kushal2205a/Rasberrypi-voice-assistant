@@ -368,8 +368,9 @@ class ParallelVoiceAssistant:
 
         if finalize_future is not None:
             self.stt_futures.put((self.stats.stt_chunks + 1, finalize_future, time.time()))
-            # Drain STT futures (including this final one) before telling LLM no more text is coming
-            self._process_stt_results(wait=True)
+
+        # Drain STT futures (including this final one) before telling LLM no more text is coming
+        self._process_stt_results(wait=True)
 
 
         # Signal the LLM pipeline that no more text is coming once final STT results are queued.
@@ -426,7 +427,7 @@ class ParallelVoiceAssistant:
 
                 future = self.stt.submit_chunk(audio_chunk, chunk_id)
                 if pending_vad_stop:
-                    time.sleep(0.18)
+                    time.sleep(0.11)
                     self._request_stop("[MAIN] VAD detected end of speech; stopping recorder.")
 
                 if not is_silent:
@@ -519,7 +520,12 @@ class ParallelVoiceAssistant:
                         )
 
                     continue
-                if self._has_detected_speech and not self._stt_flush_in_progress and not self._flushed_since_last_speech:
+                if (
+                    not getattr(self, "_use_vad", False)
+                    and self._has_detected_speech
+                    and not self._stt_flush_in_progress
+                    and not self._flushed_since_last_speech
+                ):
                     self._queue_intermediate_transcription("[STT] Silence boundary -> flushing buffered speech")
                     self._flushed_since_last_speech = True
                 # Treat as silent/noise: increment silent-chunk logic and DO NOT feed to LLM

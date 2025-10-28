@@ -48,8 +48,8 @@ class PersistentWhisperSTT:
         # faster-whisper params:
         model_name: str = "tiny.en",    # English-only gives a slight speed win
         compute_type: str = "int8",     # good on Pi 4
-        window_ms: int = 1900,          # rolling window size for partials
-        min_partial_interval_ms: int = 300,  # throttle partial frequency
+        window_ms: int = 1650,          # rolling window size for partials
+        min_partial_interval_ms: int = 360,  # throttle partial frequency
         language: Optional[str] = "en",
         use_vad: bool = False,          # VAD adds overhead on Pi; keep off for partials
     ) -> None:
@@ -215,8 +215,8 @@ class PersistentWhisperSTT:
         if not full_pcm:
             return {"chunk_id": chunk_id, "text": "", "is_final": True}
 
-        # D: decode just the last ~3.0s to finish the utterance tail quickly
-        tail_seconds = 3.0
+        # D: decode just the last ~2.2s to finish the utterance tail quickly
+        tail_seconds = 2.2
         tail_bytes = int(self._target_sr * 2 * tail_seconds)
         tail_pcm = full_pcm[-tail_bytes:] if len(full_pcm) > tail_bytes else full_pcm
 
