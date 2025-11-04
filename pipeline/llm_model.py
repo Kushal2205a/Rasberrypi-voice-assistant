@@ -111,17 +111,26 @@ def llama110(prompt_text: str,
         raise FileNotFoundError(f"llama model not found at: {model}")
 
     # Build command (adjust flags to your llama-cli flavor if different)
+    chat_prompt = (
+        "<|start_header_id|>system<|end_header_id|>\n"
+        "You are a concise, helpful Raspberry Pi voice assistant.\n"
+        "<|eot_id|>"
+        "<|start_header_id|>user<|end_header_id|>\n"
+        f"{prompt_text}\n"
+        "<|eot_id|>"
+        "<|start_header_id|>assistant<|end_header_id|>\n"
+    )
     cmd = [
-        str(exe),
-        "-m", str(model),
-        "-p", prompt_text,
+        str(exe), "-m", str(model),
+        "-p", chat_prompt,
         "-n", str(n_predict),
         "-t", str(threads),
         "--temp", str(temperature),
-        "-no-cnv",       
         "--single-turn",
+        "--repeat-penalty", "1.10",
+        "--top-k", "40",
+        "--top-p", "0.95"
     ]
-
     # start sampling and call subprocess
     sampler.start()
     t_before = time.time()
@@ -192,7 +201,7 @@ class StreamingLLM:
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.llama_kwargs = llama_kwargs or {}
 
-        self.llama_kwargs.setdefault("n_predict", 12)
+        self.llama_kwargs.setdefault("n_predict", 256)
         self.llama_kwargs.setdefault("threads", os.cpu_count() or 4)
         self.llama_kwargs.setdefault("temperature", 0.6)
         self._closed = False
