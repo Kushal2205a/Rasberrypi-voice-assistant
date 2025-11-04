@@ -85,7 +85,7 @@ def llama110(prompt_text: str,
     if llama_cli_path is None:
         llama_cli_path = str(Path.home() / "llama.cpp" / "build" / "bin" / "llama-cli")
     if model_path is None:
-        model_path = str(Path.home() / "Downloads" / "llama2.c-stories110M-pruned50.Q3_K_M.gguf")
+        model_path = str(Path.home() / "Downloads" / "Llama-3.2-1B-Instruct-Q4_K_M.gguf")
 
     exe = Path(llama_cli_path)
     model = Path(model_path)
