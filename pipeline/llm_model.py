@@ -221,6 +221,9 @@ class StreamingLLM:
             should_generate = bool(self.context_buffer)
         elif self._should_respond():
             should_generate = True
+            
+        should_generate = bool(self.context_buffer) if is_final else False
+
 
         if not should_generate:
             return None
