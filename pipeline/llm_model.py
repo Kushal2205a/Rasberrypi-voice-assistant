@@ -72,9 +72,9 @@ def speak_text_timed(text: str, cmd=None):
 def llama110(prompt_text: str,
              llama_cli_path: str = None,
              model_path: str = None,
-             n_predict: int = 16,
+             n_predict: int = 256,
              threads: int = 4,
-             temperature: float = 0.2,
+             temperature: float = 0.7,
              sampler: ResourceSampler = None,
              tts_after: bool = False,
              tts_cmd = None,
@@ -235,9 +235,9 @@ class StreamingLLM:
             "llama_cli_path": self.llama_kwargs.get("llama_cli_path"),
             "model_path": self.llama_kwargs.get("model_path"),
 
-            "n_predict": self.llama_kwargs.get("n_predict", 12),
+            "n_predict": self.llama_kwargs.get("n_predict", 256),
             "threads": self.llama_kwargs.get("threads", os.cpu_count() or 4),
-            "temperature": self.llama_kwargs.get("temperature", 0.6),
+            "temperature": self.llama_kwargs.get("temperature", 0.7),
 
             "sampler": self.llama_kwargs.get("sampler"),
             "tts_after": False,
