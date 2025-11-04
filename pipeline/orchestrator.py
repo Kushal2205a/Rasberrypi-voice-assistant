@@ -192,7 +192,7 @@ class ParallelVoiceAssistant:
             return
 
         flush_id = self._next_finalize_id
-        future = self.stt.finalize(flush_id, mark_final=False)
+        future = self.stt.finalize(flush_id, mark_final=True)
         if future is None:
             return
 

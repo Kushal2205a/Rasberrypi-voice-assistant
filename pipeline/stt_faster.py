@@ -177,10 +177,11 @@ class PersistentWhisperSTT:
     def _finalize_worker(self, chunk_id: int, mark_final: bool) -> Dict[str, Any]:
         with self._lock:
             full_pcm = b"".join(self._chunks)
-            # reset rolling + chunks for next turn
-            self._rolling.clear()
-            self._chunks.clear()
-            self._last_emitted_text = ""
+            # only clear state when this is truly final
+            if mark_final:
+                self._rolling.clear()
+                self._chunks.clear()
+                self._last_emitted_text = ""
             self._inflight = False
 
         if not full_pcm:
