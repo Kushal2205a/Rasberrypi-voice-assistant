@@ -37,8 +37,8 @@ def _parse_args() -> argparse.Namespace:
         help="Threads to dedicate to whisper.cpp",
     )
     parser.add_argument("--threads", type=int, default=os.cpu_count() or 4, help="Threads to pass to llama110")
-    parser.add_argument("--n-predict", type=int, default=12, help="Tokens to generate with llama110")
-    parser.add_argument("--temperature", type=float, default=0.1, help="Sampling temperature for llama110")
+    parser.add_argument("--n-predict", type=int, default=256, help="Tokens to generate with llama110")
+    parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature for llama110")
     parser.add_argument("--llama-cli", type=Path, default=None, help="Optional override for llama-cli path")
     parser.add_argument("--llama-model", type=Path, default=None, help="Optional override for llama model path")
 
