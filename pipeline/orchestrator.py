@@ -109,17 +109,19 @@ class ParallelVoiceAssistant:
         )
 
         
-        """self.tts = BufferedTTS(
+        self.tts = BufferedTTS(
             model_path=piper_model_path,
-            playback_cmd=playback_cmd,
+            playback_cmd=playback_cmd,          # defaults to: aplay -t raw ...
             output_device=output_device,
-
-            use_subprocess=use_subprocess_playback,
-
+            use_subprocess=use_subprocess_playback,  # keep True for Pi
             on_playback_start=self._on_tts_playback_start,
             on_playback_error=self._on_tts_playback_error,
-        )"""
-        self.tts = None
+        )
+
+        # --- LLM → TTS streaming buffer state ---
+        self._spoken_buf: List[str] = []
+        self._spoken_words: int = 0
+        self._segment_id: int = 0
         self.stt_futures: "queue.Queue[Tuple[int, Future, float]]" = queue.Queue()
         self.llm_futures: "queue.Queue[Tuple[Future, float, float]]" = queue.Queue()
         self.stats = PipelineStats()
@@ -171,6 +173,8 @@ class ParallelVoiceAssistant:
         
         self._flushed_since_last_speech = False
         self.espeak_tts = lambda text, segment_id: speak_text_timed(text)
+        
+        self.llm.set_stream_callback(self._on_llm_token)
 
 
 
@@ -303,8 +307,9 @@ class ParallelVoiceAssistant:
         self._next_finalize_id = 1_000_000
 
 
+        if self.tts:
+            self.tts.start_playback()
         self.recorder.start()
-    
 
         stt_thread = threading.Thread(target=self._stt_pipeline, name="STTPipeline", daemon=True)
         llm_thread = threading.Thread(target=self._llm_pipeline, name="LLMPipeline", daemon=True)
@@ -382,6 +387,8 @@ class ParallelVoiceAssistant:
         self.stt.shutdown()
         self.llm.shutdown()
         self._wait_for_tts_completion()
+        if self.tts:
+            self.tts.stop()
 
 
         elapsed = time.time() - start_time
@@ -538,32 +545,23 @@ class ParallelVoiceAssistant:
         segment_id = 0
         while not self._stt_done.is_set() or not self.llm_futures.empty():
             try:
-
                 llm_future, _submit_time, reference_timestamp = self.llm_futures.get(timeout=0.5)
-
             except queue.Empty:
                 continue
 
             response = ""
             try:
                 response = llm_future.result(timeout=300)
-
                 response_ready_time = time.time()
-
             except Exception as exc:
                 print(f"[LLM Pipeline] Error: {exc}")
                 continue
 
-
             latency = max(0.0, response_ready_time - reference_timestamp)
-
             self.stats.llm_latencies.append(latency)
 
             if self.stats.recording_to_first_llm_latency is None:
-                
-
-                
-                if  self._recording_stop_time is not None:
+                if self._recording_stop_time is not None:
                     self.stats.recording_to_first_llm_latency = max(
                         0.0, response_ready_time - self._recording_stop_time
                     )
@@ -572,7 +570,6 @@ class ParallelVoiceAssistant:
                         0.0, response_ready_time - reference_timestamp
                     )
 
-
             response = (response or "").strip()
             if not response:
                 continue
@@ -580,40 +577,24 @@ class ParallelVoiceAssistant:
             print(f"[LLM] Response: {response[:120]}{'...' if len(response) > 120 else ''}")
             self.stats.llm_responses += 1
 
+            # --- Streaming TTS path: flush any leftover words the token-callback hasn’t spoken ---
+            if self.tts:
+                if self._spoken_buf:
+                    residual = "".join(self._spoken_buf).strip()
+                    if residual:
+                        self.tts.generate_and_queue(residual, self._segment_id)
+                        self.stats.tts_segments += 1
+                        self._segment_id += 1
+                    self._spoken_buf.clear()
+                    self._spoken_words = 0
+                continue  # streaming already handled speaking
 
-            sentences = self._split_sentences(response)
-            if not sentences:
-                sentences = [response]
-            """
-            tts_jobs: List[Tuple[Future, float]] = []
+            # --- Fallback (no Piper): sentence-by-sentence via espeak ---
+            sentences = self._split_sentences(response) or [response]
             for sentence in sentences:
-                submit_time = time.time()
-                self.espeak_tts(sentence, segment_id)
-                self.stats.tts_segments += 1
-                try:
-                    if getattr(self, "recorder", None) and getattr(self.recorder, "recording", False):
-                        self._request_stop("[MAIN] Stopping recorder during TTS to avoid feedback.")
-                except Exception:
-                    pass
-
-            pending_timestamp = self._reference_timestamp_for_output(reference_timestamp)
-            pending = PendingOutput(timestamp=pending_timestamp, segments_expected=len(tts_jobs))
-
-            with self._pending_lock:
-                self.stats.pending_outputs.append(pending)
-
-            for future, submit_time in tts_jobs:
-                future.add_done_callback(
-                    lambda fut, start=submit_time, pending_ref=pending: self._on_tts_generated(fut, start, pending_ref)
-                )
-            """
-            
-            for sentence in sentences:
-                # mark "audio start" for latency metrics
                 started_at = time.time()
 
-                # First-TTS metrics
-                if (self.stats.recording_start_to_first_tts_latency is None 
+                if (self.stats.recording_start_to_first_tts_latency is None
                         and getattr(self.stats, "recording_start_time", None) is not None):
                     self.stats.recording_start_to_first_tts_latency = max(
                         0.0, started_at - self.stats.recording_start_time
@@ -623,14 +604,11 @@ class ParallelVoiceAssistant:
                         0.0, started_at - self._recording_stop_time
                     )
 
-                # input -> output gap (reference to playback start)
                 self.stats.input_to_output_latencies.append(max(0.0, started_at - reference_timestamp))
 
-                # Speak (sync, fast) and bump stats
                 self.espeak_tts(sentence, segment_id)
                 self.stats.tts_segments += 1
 
-                # Avoid feedback: stop recorder if still running
                 try:
                     if getattr(self, "recorder", None) and getattr(self.recorder, "recording", False):
                         self._request_stop("[MAIN] Stopping recorder during TTS to avoid feedback.")
@@ -666,12 +644,9 @@ class ParallelVoiceAssistant:
 
     def _on_tts_playback_start(self, file_path: str, started_at: float) -> None:
         
-        if (
-        self.stats.recording_start_to_first_tts_latency is None
-        and getattr(self.stats, "recording_start_time", None) is not None
-        ):
-            self.stats.recording_start_to_first_tts_latency = max(
-                0.0, started_at - self.stats.recording_stop_time
+        if (self.stats.recording_start_to_first_tts_latency is None and getattr(self.stats, "recording_start_time", None) is not None):
+                self.stats.recording_start_to_first_tts_latency = max(
+                0.0, started_at - self.stats.recording_start_time
             )
 
         if (
@@ -703,6 +678,24 @@ class ParallelVoiceAssistant:
                 self._request_stop("[MAIN] Stopping recorder during TTS to avoid feedback.")
         except Exception as e:
             self._log(f"[TTS] playback_start hook error: {e}")
+    
+    
+    def _on_llm_token(self, tok: str) -> None:
+        """Called by Ollama adapter for each streamed token/chunk."""
+        if not tok:
+            return
+        # buffer words; speak at sentence end or every ~12 words
+        self._spoken_buf.append(tok)
+        self._spoken_words += tok.count(" ") + 1
+        should_flush = any(tok.endswith(p) for p in (".", "!", "?")) or (self._spoken_words >= 12)
+        if should_flush and self.tts:
+            text = "".join(self._spoken_buf).strip()
+            if text:
+                self.tts.generate_and_queue(text, self._segment_id)
+                self.stats.tts_segments += 1
+                self._segment_id += 1
+            self._spoken_buf.clear()
+            self._spoken_words = 0
 
     def _on_tts_playback_error(self) -> None:
         with self._pending_lock:
