@@ -69,7 +69,7 @@ class ModelPreloader:
                 prompt_text="Hello",
                 llama_cli_path=kwargs.get("llama_cli_path"),
                 model_path=kwargs.get("model_path"),
-                n_predict=8,
+                n_predict=96,
                 threads=kwargs.get("threads", os.cpu_count() or 4),
                 temperature=kwargs.get("temperature", 0.5),
                 sampler=kwargs.get("sampler"),

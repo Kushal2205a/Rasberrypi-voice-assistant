@@ -72,7 +72,7 @@ def speak_text_timed(text: str, cmd=None):
 def llama110(prompt_text: str,
              llama_cli_path: str = None,
              model_path: str = None,
-             n_predict: int = 256,
+             n_predict: int = 96,
              threads: int = 4,
              temperature: float = 0.7,
              sampler: ResourceSampler = None,
@@ -201,7 +201,7 @@ class StreamingLLM:
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.llama_kwargs = llama_kwargs or {}
 
-        self.llama_kwargs.setdefault("n_predict", 256)
+        self.llama_kwargs.setdefault("n_predict", 96)
         self.llama_kwargs.setdefault("threads", os.cpu_count() or 4)
         self.llama_kwargs.setdefault("temperature", 0.6)
         self._closed = False
@@ -247,7 +247,7 @@ class StreamingLLM:
             "llama_cli_path": self.llama_kwargs.get("llama_cli_path"),
             "model_path": self.llama_kwargs.get("model_path"),
 
-            "n_predict": self.llama_kwargs.get("n_predict", 256),
+            "n_predict": self.llama_kwargs.get("n_predict", 96),
             "threads": self.llama_kwargs.get("threads", os.cpu_count() or 4),
             "temperature": self.llama_kwargs.get("temperature", 0.7),
 
@@ -276,16 +276,29 @@ class StreamingLLM:
     @staticmethod
     def _clean_response(response: str) -> str:
         text = (response or "").strip()
-        leading_quotes = ('"', "'", "`", "â€œ", "â€", "â€˜", "â€™")
+        # 1) Drop obvious chat tokens / headers / EOS phrases
+        junk = [
+            "[end of text]", "<|eot_id|>",
+            "<|start_header_id|>assistant<|end_header_id|>",
+            "<|start_header_id|>user<|end_header_id|>",
+            "<|start_header_id|>system<|end_header_id|>",
+        ]
+        for j in junk:
+            text = text.replace(j, "")
+        # 2) If model printed role names, strip them at the front
+        for prefix in ("assistantassistant", "assistant:", "assistant"):
+            if text.lower().startswith(prefix):
+                text = text[len(prefix):].lstrip()
+        # 3) Tidy leading quotes / odd punctuation the tiny models sometimes emit
+        leading_quotes = ('"', "'", "`", "“", "”", "‘", "’")
         while text and text[0] in leading_quotes:
             text = text[1:].lstrip()
         if text.startswith("?"):
-            # Strip leading question mark artifacts such as ?" or ? 'Hello'
-            trimmed = text[1:].lstrip()
-            if trimmed and trimmed[0].isalpha():
-                text = trimmed
-        if text.startswith("\"") and len(text) > 1:
-            text = text[1:].lstrip()
+            t = text[1:].lstrip()
+            if t and t[0].isalpha():
+                text = t
+        # 4) Collapse whitespace
+        text = " ".join(text.split())
         return text
 
 
