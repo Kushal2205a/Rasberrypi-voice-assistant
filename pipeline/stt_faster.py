@@ -51,7 +51,7 @@ class PersistentWhisperSTT:
         window_ms: int = 1200,          # rolling window size for partials
         min_partial_interval_ms: int = 350,  # throttle partial frequency
         language: Optional[str] = "en",
-        use_vad: bool = False,          # VAD adds overhead on Pi; keep off for partials
+        use_vad: bool = True,          # VAD adds overhead on Pi; keep off for partials
     ) -> None:
         if WhisperModel is None:
             raise RuntimeError(f"faster-whisper is not installed: {_import_err}")
