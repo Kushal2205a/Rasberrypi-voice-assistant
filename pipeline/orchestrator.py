@@ -14,8 +14,11 @@ try:
 except Exception:
     from stt import ParallelSTT
 from tts import BufferedTTS
-from llm_model import StreamingLLM, speak_text_timed
 
+#from llm_model import StreamingLLM, speak_text_timed
+import os
+from llm_model import speak_text_timed
+from llm_ollama_adapter import OllamaStreamingLLM
 
 
 
@@ -95,7 +98,16 @@ class ParallelVoiceAssistant:
                 whisper_threads=whisper_threads,
                 emit_partials=emit_stt_partials,
             )
-        self.llm = StreamingLLM(llama_kwargs=llama_kwargs)
+            
+        #self.llm = StreamingLLM(llama_kwargs=llama_kwargs)
+        self.llm = OllamaStreamingLLM(
+        model=os.getenv("OLLAMA_MODEL", "llama3.2:1b"),
+        host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
+        keep_alive=os.getenv("LLM_KEEP_ALIVE", "30m"),
+        num_ctx=int(os.getenv("OLLAMA_NUM_CTX", "512")),
+        num_thread=int(os.getenv("OLLAMA_NUM_THREAD", "4")),
+        )
+
         
         """self.tts = BufferedTTS(
             model_path=piper_model_path,
