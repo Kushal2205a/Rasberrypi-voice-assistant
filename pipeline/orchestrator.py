@@ -356,7 +356,7 @@ class ParallelVoiceAssistant:
 
             self.stats.recording_stop_time = self._recording_stop_time
 
-        stt_thread.join(timeout=2.0)
+        stt_thread.join()
 
         # Decide whether to run a final STT pass
         finalize_future = None
