@@ -51,7 +51,7 @@ class PersistentWhisperSTT:
         window_ms: int = 1200,          # rolling window size for partials
         min_partial_interval_ms: int = 350,  # throttle partial frequency
         language: Optional[str] = "en",
-        use_vad: bool = True,          # VAD adds overhead on Pi; keep off for partials
+        use_vad: bool = False,          # VAD adds overhead on Pi; keep off for partials
     ) -> None:
         if WhisperModel is None:
             raise RuntimeError(f"faster-whisper is not installed: {_import_err}")
@@ -135,16 +135,11 @@ class PersistentWhisperSTT:
         return (dst / 32768.0).astype(np.float32)
 
 
-    def _transcribe(self, pcm: np.ndarray) -> str:
-        segs, _info = self.model.transcribe(
-            pcm,
-            language=self.language,
-            vad_filter=self.use_vad,
-            beam_size=1,           # greedy is faster
-            temperature=0.0,
-            condition_on_previous_text=False,
-            word_timestamps=False,
-        )
+    def _transcribe(self, pcm: np.ndarray, beam: int = 1) -> str:
+        segs, _ = self.model.transcribe(
+        pcm, language=self.language, vad_filter=self.use_vad,
+        beam_size=beam, temperature=0.0,
+        condition_on_previous_text=False, word_timestamps=False)
         return "".join(s.text for s in segs).strip()
 
     # ---------- core workers ----------
@@ -187,7 +182,7 @@ class PersistentWhisperSTT:
         if not full_pcm:
             return {"chunk_id": chunk_id, "text": "", "is_final": True}
 
-        text = self._transcribe(self._pcm_bytes_to_float32(full_pcm))
+        text = self._transcribe(self._pcm_bytes_to_float32(full_pcm), beam=2)
         return {"chunk_id": chunk_id, "text": text, "is_final": mark_final}
 
     # ---------- public API ----------

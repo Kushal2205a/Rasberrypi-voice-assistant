@@ -97,6 +97,11 @@ class ParallelVoiceAssistant:
                 whisper_model=whisper_model,
                 whisper_threads=whisper_threads,
                 emit_partials=emit_stt_partials,
+                model_name="tiny.en",
+                compute_type="int8",
+                window_ms=1000,                 # (see tweak B)
+                min_partial_interval_ms=250,    # (see tweak B)
+                use_vad=False,    
             )
             
         #self.llm = StreamingLLM(llama_kwargs=llama_kwargs)
@@ -715,7 +720,7 @@ class ParallelVoiceAssistant:
         
         out: List[str] = []
         cur: List[str] = []
-        MAX_WORDS = 10
+        MAX_WORDS = 12
         for w in words :
             cur.append(w)
             if len(cur) >= MAX_WORDS or any(w.endswith(p) for p in (".","!","?")):
