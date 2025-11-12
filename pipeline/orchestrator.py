@@ -114,7 +114,7 @@ class ParallelVoiceAssistant:
         
         self.tts = BufferedTTS(
             model_path=piper_model_path,
-            playback_cmd=playback_cmd,          # defaults to: aplay -t raw ...
+            playback_cmd=["aplay", "-t", "raw", "-f", "S16_LE", "-r", "22050", "-c", "1", "-"],          # defaults to: aplay -t raw ...
             output_device=output_device,
             use_subprocess=True,  # keep True for Pi
             on_playback_start=self._on_tts_playback_start,
