@@ -100,6 +100,8 @@ class PersistentVoskSTT:
         # single-flight gate (avoid overlapping decodes)
         self._lock = threading.Lock()
         self._inflight = False
+        
+        self._pending = bytearray()
 
     # -------- helpers --------
 
@@ -189,24 +191,38 @@ class PersistentVoskSTT:
                 self._inflight = False
 
     def _finalize_worker(self, chunk_id: int, mark_final: bool) -> Dict[str, Any]:
-        # Final flush of recognizer
-        recog = self._state.recognizer
         try:
-            fres = json.loads(recog.FinalResult() or "{}")
-        except Exception:
-            fres = {}
-        finally:   
+            # 🔹 Consume any audio we buffered while the worker was busy
             with self._lock:
-                self._inflight = False
-                self.finalizing = False
-        final_seg = (fres.get("text") or "").strip()
-        text = self._state.stable_text
-        if final_seg:
-            text = (text + " " + final_seg).strip() if text else final_seg
+                leftover = bytes(self._pending)
+                self._pending.clear()
 
-        # Reset recognizer for next utterance (fresh state)
-        self._state = _State(KaldiRecognizer(self._model, self._target_sr))
-        return {"chunk_id": chunk_id, "text": text, "is_final": bool(mark_final)}
+            if leftover:
+                try:
+                    audio_16k = self._resample_to_16k(leftover)
+                    self._feed_and_read(audio_16k)
+                except Exception as e:
+                    print(f"[STT][VOSK] Error feeding leftover audio during finalize: {e}")
+
+            recog = self._state.recognizer
+            try:
+                fres = json.loads(recog.FinalResult() or "{}")
+            except Exception:
+                fres = {}
+
+            final_seg = (fres.get("text") or "").strip()
+            text = self._state.stable_text
+            if final_seg:
+                text = (text + " " + final_seg).strip() if text else final_seg
+
+            # Reset recognizer for next utterance
+            self._state = _State(KaldiRecognizer(self._model, self._target_sr))
+            return {"chunk_id": chunk_id, "text": text, "is_final": bool(mark_final)}
+
+        finally:
+            with self._lock:
+                self._finalizing = False
+                self._inflight = False
 
     # -------- public API --------
 
@@ -214,7 +230,13 @@ class PersistentVoskSTT:
         audio_bytes = np.ascontiguousarray(audio_chunk, dtype=np.int16).tobytes()
         with self._lock:
             if self.finalizing or self._inflight:
+                # ⇨ do not lose audio when busy
+                self._pending.extend(audio_bytes)
                 return self.empty_future(chunk_id)
+            # prepend anything we buffered while busy
+            if self._pending:
+                audio_bytes = bytes(self._pending) + audio_bytes
+                self._pending.clear()
             self._inflight = True
         return self.executor.submit(self._partial_worker, chunk_id, audio_bytes)
 
