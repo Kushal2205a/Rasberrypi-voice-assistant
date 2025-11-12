@@ -9,10 +9,12 @@ import os, threading, queue, re, math, psutil, numpy as np
 
 from config import CHUNK_DURATION, SAMPLE_RATE, WHISPER_EXE, WHISPER_MODEL, PIPER_MODEL_PATH, DEFAULT_SILENCE_THRESHOLD, DEFAULT_SILENCE_TIMEOUT
 from recorder import StreamingRecorder
+"""
 try:
     from stt_faster import PersistentWhisperSTT as ParallelSTT
 except Exception:
     from stt import ParallelSTT
+"""
 from tts import BufferedTTS
 
 #from llm_model import StreamingLLM, speak_text_timed
@@ -20,6 +22,7 @@ import os
 from llm_model import speak_text_timed
 from llm_ollama_adapter import OllamaStreamingLLM
 
+from stt_vosk import PersistentVoskSTT as ParallelSTT
 
 
 @dataclass
@@ -93,15 +96,9 @@ class ParallelVoiceAssistant:
             self.stt = ParallelSTT(
                 num_workers=stt_workers,
                 sample_rate=sample_rate,
-                whisper_exe=whisper_exe,
-                whisper_model=whisper_model,
-                whisper_threads=whisper_threads,
-                emit_partials=emit_stt_partials,
-                model_name="tiny.en",
-                compute_type="int8",
-                window_ms=1000,                 # (see tweak B)
-                min_partial_interval_ms=250,    # (see tweak B)
-                use_vad=True,    
+                emit_partials=True,              # keep partials on (good for UX + LLM overlap)
+                vad_aggressiveness=2,            # 0..3, tune higher in noisy rooms
+                min_partial_interval_ms=120    
             )
             
         #self.llm = StreamingLLM(llama_kwargs=llama_kwargs)
