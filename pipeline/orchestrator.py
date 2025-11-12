@@ -116,7 +116,7 @@ class ParallelVoiceAssistant:
             model_path=piper_model_path,
             playback_cmd=playback_cmd,          # defaults to: aplay -t raw ...
             output_device=output_device,
-            use_subprocess=use_subprocess_playback,  # keep True for Pi
+            use_subprocess=True,  # keep True for Pi
             on_playback_start=self._on_tts_playback_start,
             on_playback_error=self._on_tts_playback_error,
         )
@@ -691,14 +691,34 @@ class ParallelVoiceAssistant:
         self._spoken_buf.append(tok)
         self._spoken_words += tok.count(" ") + 1
         should_flush = any(tok.endswith(p) for p in (".", "!", "?")) or (self._spoken_words >= 12)
+
         if should_flush and self.tts:
             text = "".join(self._spoken_buf).strip()
-            if text:
-                self.tts.generate_and_queue(text, self._segment_id)
-                self.stats.tts_segments += 1
-                self._segment_id += 1
             self._spoken_buf.clear()
             self._spoken_words = 0
+            if not text:
+                return
+
+            submit_time = time.time()
+            fut = self.tts.generate_and_queue(text, self._segment_id)
+            if fut is None:
+                return
+
+            self.stats.tts_segments += 1
+            self._segment_id += 1
+
+            # pending output: one segment for this flush
+            pending_ts = self._reference_timestamp_for_output(submit_time)
+            pending = PendingOutput(timestamp=pending_ts, segments_expected=1)
+            with self._pending_lock:
+                self.stats.pending_outputs.append(pending)
+
+            with self._tts_futures_lock:
+                self._pending_tts_futures.add(fut)
+
+            fut.add_done_callback(
+                lambda f, start=submit_time, p=pending: self._on_tts_generated(f, start, p)
+            )
 
     def _on_tts_playback_error(self) -> None:
         with self._pending_lock:

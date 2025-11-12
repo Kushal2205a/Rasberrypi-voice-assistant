@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Optional,Any,Iterable,Callable, Dict, List
 from concurrent.futures import Future, ThreadPoolExecutor
 
-import os, subprocess, threading, queue, json, selectors,wave,tempfile
+import os, subprocess, threading, queue, json, selectors,wave,tempfile,shutil
 import numpy as np, sounddevice as sd 
 import time
 
@@ -52,12 +52,30 @@ class BufferedTTS:
         self.executor = ThreadPoolExecutor(max_workers=2)
         self.playing = False
         self._playback_thread: Optional[threading.Thread] = None
+        self.use_subprocess = bool(use_subprocess)
+
+        info = self._voice_info
         if playback_cmd:
             self.playback_cmd = list(playback_cmd)
         else:
-            info = self._voice_info
-            self.playback_cmd = ["aplay","-t","raw", "-f","S16_LE","-r",str(info.sample_rate),"-c",str(info.channels), "-"]
-        self.use_subprocess = bool(use_subprocess)
+            paplay = shutil.which("paplay")
+            aplay = shutil.which("aplay")
+            if paplay:
+                # paplay works well with PulseAudio/Bluetooth
+                self.playback_cmd = ["paplay", "--raw",
+                                    "--rate", str(info.sample_rate),
+                                    "--channels", str(info.channels),
+                                    "--format", "s16le", "-"]
+            elif aplay:
+                self.playback_cmd = ["aplay", "-t", "raw",
+                                    "-f", "S16_LE",
+                                    "-r", str(info.sample_rate),
+                                    "-c", str(info.channels), "-"]
+            else:
+                # fallback to direct PortAudio playback if no cli players present
+                self.playback_cmd = []
+                self.use_subprocess = False
+                
         self.blocking_playback = bool (blocking_playback)
         
         
@@ -136,22 +154,38 @@ class BufferedTTS:
     
     def _ensure_piper(self):
         if self._piper_proc and self._piper_proc.poll() is None:
-            return 
-        
-        if self.out_dir is None :
+            return
+
+        if self.out_dir is None:
             self.out_dir = Path(tempfile.mkdtemp(prefix="piper_out_"))
-            
+
+        # Resolve piper exe: 1) env PIPER_EXE  2) PATH (which)  3) common fallback
+        import shutil
+        piper_exe = os.environ.get("PIPER_EXE") or shutil.which("piper") or "~/usr/bin/piper/"
+
+        if not Path(piper_exe).exists() and shutil.which(piper_exe) is None:
+            print(f"[TTS] Piper not found at '{piper_exe}'. Set PIPER_EXE or install piper.")
+            self._piper_proc = None
+            return
+
         info = self._voice_info
-        cmd = ["/usr/local/bin/piper/piper", "-m", str(self.model_path), "--output_raw", "-"]
+        cmd = [piper_exe, "-m", str(self.model_path), "--output_raw", "-"]
         if info.speaker_id is not None:
             cmd += ["--speaker", str(info.speaker_id)]
-        
-        self._piper_proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
-                                            stdout=subprocess.PIPE,
-                                            stderr= subprocess.DEVNULL,
-                                            text=False,
-                                            bufsize = 0
-                                            )
+
+        try:
+            self._piper_proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,  # change to subprocess.STDOUT to debug
+                text=False,
+                bufsize=0,
+            )
+            print(f"[TTS] Started Piper: {' '.join(cmd)}")
+        except Exception as e:
+            print(f"[TTS] Failed to start Piper: {e}  (cmd: {' '.join(cmd)})")
+            self._piper_proc = None
 
 
     def start_playback(self) -> None:
