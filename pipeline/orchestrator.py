@@ -101,7 +101,7 @@ class ParallelVoiceAssistant:
                 compute_type="int8",
                 window_ms=1000,                 # (see tweak B)
                 min_partial_interval_ms=250,    # (see tweak B)
-                use_vad=False,    
+                use_vad=True,    
             )
             
         #self.llm = StreamingLLM(llama_kwargs=llama_kwargs)
