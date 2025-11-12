@@ -56,6 +56,7 @@ class _State:
 
 
 class PersistentVoskSTT:
+    IS_STREAMING = True
     """
     Drop-in replacement for your ParallelSTT:
       - submit_chunk(audio_chunk: np.ndarray, chunk_id: int) -> Future[{chunk_id,text,is_final}]
@@ -81,6 +82,7 @@ class PersistentVoskSTT:
         self.executor = ThreadPoolExecutor(max_workers=max(2, num_workers))
         self.sample_rate = int(sample_rate)
         self.emit_partials = bool(emit_partials)
+        self.finalizing = False
 
         self._target_sr = 16000                  # Vosk expects 16k
         self._model = _get_vosk_model(Path(model_path or VOSK_MODEL_PATH))
@@ -193,6 +195,10 @@ class PersistentVoskSTT:
             fres = json.loads(recog.FinalResult() or "{}")
         except Exception:
             fres = {}
+        finally:   
+            with self._lock:
+                self._inflight = False
+                self.finalizing = False
         final_seg = (fres.get("text") or "").strip()
         text = self._state.stable_text
         if final_seg:
@@ -207,12 +213,14 @@ class PersistentVoskSTT:
     def submit_chunk(self, audio_chunk: np.ndarray, chunk_id: int) -> Future:
         audio_bytes = np.ascontiguousarray(audio_chunk, dtype=np.int16).tobytes()
         with self._lock:
-            if self._inflight:
+            if self.finalizing or self._inflight:
                 return self.empty_future(chunk_id)
             self._inflight = True
         return self.executor.submit(self._partial_worker, chunk_id, audio_bytes)
 
     def finalize(self, chunk_id: int, mark_final: bool = True) -> Optional[Future]:
+        with self._lock:
+            self.finalizing = True
         return self.executor.submit(self._finalize_worker, chunk_id, mark_final)
 
     def reset(self) -> None:

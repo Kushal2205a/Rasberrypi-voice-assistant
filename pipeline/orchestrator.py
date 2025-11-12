@@ -100,7 +100,8 @@ class ParallelVoiceAssistant:
                 vad_aggressiveness=2,            # 0..3, tune higher in noisy rooms
                 min_partial_interval_ms=120    
             )
-            
+        self._stt_streaming = bool(getattr(self.stt, "IS_STREAMING", False))
+        
         #self.llm = StreamingLLM(llama_kwargs=llama_kwargs)
         self.llm = OllamaStreamingLLM(
         model=os.getenv("OLLAMA_MODEL", "llama3.2:1b"),
@@ -206,6 +207,10 @@ class ParallelVoiceAssistant:
         return False
 
     def _queue_intermediate_transcription(self, reason: str) -> None:
+        # Never force a mid-utterance finalize for streaming backends (e.g., Vosk)
+        if getattr(self, "_stt_streaming", False):
+            return
+
         if self._stt_flush_in_progress:
             return
 
@@ -366,19 +371,10 @@ class ParallelVoiceAssistant:
         stt_thread.join()
 
         # Decide whether to run a final STT pass
-        finalize_future = None
-        recent_voice = False
-        if self.stats.stt_chunks > 0:
-            with self._activity_lock:
-                if self._last_voice_time:
-                    recent_voice = (time.time() - self._last_voice_time) < 1.0
-
-        if not recent_voice:
-            finalize_future = self.stt.finalize(self.stats.stt_chunks + 1)
-
+        finalize_future = self.stt.finalize(self.stats.stt_chunks + 1, mark_final=True)
         if finalize_future is not None:
             self.stt_futures.put((self.stats.stt_chunks + 1, finalize_future, time.time()))
-            # Drain STT futures (including this final one) before telling LLM no more text is coming
+            # Drain so LLM gets the final transcript immediately
             self._process_stt_results(wait=True)
 
 
@@ -446,6 +442,11 @@ class ParallelVoiceAssistant:
                     result = future.result()
                 except Exception as exc:
                     print(f"[STT Pipeline] Future for chunk {chunk_id} failed: {exc}")
+                    if chunk_id in self._active_flush_ids:
+                        self._active_flush_ids.discard(chunk_id)
+                        self._stt_flush_in_progress = False
+                        self._flushed_since_last_speech = True
+                        self._reset_awaiting_transcript_state()
                     continue
             else:
 
