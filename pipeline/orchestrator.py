@@ -97,7 +97,7 @@ class ParallelVoiceAssistant:
                 num_workers=stt_workers,
                 sample_rate=sample_rate,
                 emit_partials=True,              # keep partials on (good for UX + LLM overlap)
-                vad_aggressiveness=2,            # 0..3, tune higher in noisy rooms
+                vad_aggressiveness=0,            # 0..3, tune higher in noisy rooms
                 min_partial_interval_ms=120    
             )
         self._stt_streaming = bool(getattr(self.stt, "IS_STREAMING", False))
