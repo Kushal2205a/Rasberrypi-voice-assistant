@@ -161,7 +161,9 @@ class BufferedTTS:
 
         # Resolve piper exe: 1) env PIPER_EXE  2) PATH (which)  3) common fallback
         import shutil
-        piper_exe = os.environ.get("PIPER_EXE") or shutil.which("piper") or "~/usr/bin/piper/"
+        piper_exe = (os.environ.get("PIPER_EXE")
+                or shutil.which("piper")
+                or os.path.expanduser("/usr/local/bin/piper/piper"))
 
         if not Path(piper_exe).exists() and shutil.which(piper_exe) is None:
             print(f"[TTS] Piper not found at '{piper_exe}'. Set PIPER_EXE or install piper.")

@@ -32,7 +32,7 @@ from config import SAMPLE_RATE  # mic rate (e.g. 44100)
 try:
     from config import VOSK_MODEL_PATH
 except Exception:
-    VOSK_MODEL_PATH = Path.home() / "models" / "vosk-model-small-en-us-0.15"
+    VOSK_MODEL_PATH = Path.home() / "models" / "vosk-model-en-in-0.5"
 
 # Shared Vosk model across instances (avoid reload overhead)
 _SHARED_MODEL = None

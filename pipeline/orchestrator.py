@@ -104,10 +104,10 @@ class ParallelVoiceAssistant:
         
         #self.llm = StreamingLLM(llama_kwargs=llama_kwargs)
         self.llm = OllamaStreamingLLM(
-        model=os.getenv("OLLAMA_MODEL", "llama3.2:1b"),
+        model=os.getenv("OLLAMA_MODEL", "qwen:0.5b"),
         host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
         keep_alive=os.getenv("LLM_KEEP_ALIVE", "30m"),
-        num_ctx=int(os.getenv("OLLAMA_NUM_CTX", "512")),
+        num_ctx=int(os.getenv("OLLAMA_NUM_CTX", "256")),
         num_thread=int(os.getenv("OLLAMA_NUM_THREAD", "4")),
         )
 
