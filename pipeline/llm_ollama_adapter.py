@@ -2,6 +2,7 @@
 import os, json, requests
 from concurrent.futures import ThreadPoolExecutor, Future
 from typing import Optional, List, Dict, Callable
+from config import MODEL 
 
 class OllamaStreamingLLM:
     """
@@ -21,7 +22,7 @@ class OllamaStreamingLLM:
         num_thread: int = 4,
         history_max_turns: int = 2,
     ) -> None:
-        self.model = model or os.getenv("OLLAMA_MODEL", "qwen:0.5b")
+        self.model = model or os.getenv("OLLAMA_MODEL", MODEL)
         self.host = (host or os.getenv("OLLAMA_HOST", "http://0.0.0.0:11434")).rstrip("/")
         self.keep_alive = keep_alive or os.getenv("LLM_KEEP_ALIVE", "30m")
         self.num_ctx = int(os.getenv("OLLAMA_NUM_CTX", num_ctx))

@@ -129,32 +129,48 @@ class PersistentVoskSTT:
         dst = np.clip(dst, -32768.0, 32767.0).astype(np.int16)
         return dst.tobytes()
 
-    def _iter_vad_frames(self, audio_16k: bytes):
+    def _vad_has_speech_16k(self, audio_16k: bytes) -> Optional[bool]:
+        """Return True/False if VAD is enabled, None if disabled."""
         if not self._vad:
-            yield audio_16k
-            return
-        frame_len = int(self._target_sr * (self._frame_ms / 1000.0))  # samples per frame
+            return None
+
+        frame_len = int(self._target_sr * (self._frame_ms / 1000.0))
         step = frame_len * self._bytes_per_sample
+
         for i in range(0, len(audio_16k), step):
             frame = audio_16k[i:i + step]
             if len(frame) < step:
                 break
             if self._vad.is_speech(frame, self._target_sr):
-                yield frame
+                return True
+        return False
+
+    def is_speech(self, audio_chunk: np.ndarray) -> Optional[bool]:
+        """Public helper for orchestrator: speech or not (endpointing only)."""
+        if audio_chunk is None or audio_chunk.size == 0:
+            return False
+        if not self._vad:
+            return None
+
+        audio_bytes = np.ascontiguousarray(audio_chunk, dtype=np.int16).tobytes()
+        audio_16k = self._resample_to_16k(audio_bytes)
+        if not audio_16k:
+            return False
+        return self._vad_has_speech_16k(audio_16k)
+
 
     def _feed_and_read(self, audio_16k: bytes) -> Dict[str, Any]:
         recog = self._state.recognizer
         # Feed (possibly VAD-filtered) frames
-        had_final = False
-        for frame in self._iter_vad_frames(audio_16k):
-            if recog.AcceptWaveform(frame):
-                # A segment ended — collect stable text
-                res = json.loads(recog.Result() or "{}")
-                seg = (res.get("text") or "").strip()
-                if seg:
-                    if self._state.stable_text:
-                        self._state.stable_text += " "
-                    self._state.stable_text += seg
+        had_final = bool(recog.AcceptWaveform(audio_16k))
+        if had_final:
+            res = json.loads(recog.Result() or "{}")
+            seg = (res.get("text") or "").strip()
+            if seg:
+                if self._state.stable_text:
+                    self._state.stable_text += " "
+                self._state.stable_text += seg
+
                 had_final = True  # a segment finalized
 
         # If no segment finalized, get partial

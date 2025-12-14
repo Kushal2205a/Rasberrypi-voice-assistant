@@ -4,6 +4,7 @@ PROJECT_DIR = Path.cwd()
 RECORDED_WAV = PROJECT_DIR / "recorded.wav"
 SAMPLE_RATE =  44100
 
+MODEL = "qwen:0.5b"
 
 CHUNK_DURATION =  0.25
 

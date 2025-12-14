@@ -7,7 +7,7 @@ import time
 
 import os, threading, queue, re, math, psutil, numpy as np 
 
-from config import CHUNK_DURATION, SAMPLE_RATE, WHISPER_EXE, WHISPER_MODEL, PIPER_MODEL_PATH, DEFAULT_SILENCE_THRESHOLD, DEFAULT_SILENCE_TIMEOUT
+from config import CHUNK_DURATION, SAMPLE_RATE, WHISPER_EXE, WHISPER_MODEL, PIPER_MODEL_PATH, DEFAULT_SILENCE_THRESHOLD, DEFAULT_SILENCE_TIMEOUT, MODEL
 from recorder import StreamingRecorder
 """
 try:
@@ -104,7 +104,7 @@ class ParallelVoiceAssistant:
         
         #self.llm = StreamingLLM(llama_kwargs=llama_kwargs)
         self.llm = OllamaStreamingLLM(
-        model=os.getenv("OLLAMA_MODEL", "qwen:0.5b"),
+        model=os.getenv("OLLAMA_MODEL", MODEL),
         host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
         keep_alive=os.getenv("LLM_KEEP_ALIVE", "30m"),
         num_ctx=int(os.getenv("OLLAMA_NUM_CTX", "256")),
@@ -234,6 +234,18 @@ class ParallelVoiceAssistant:
             audio_view = audio_view.reshape(-1)
         rms = float(np.sqrt(np.mean(np.square(audio_view.astype(np.float32)))))
         return rms < self._silence_threshold
+
+    def _is_speech_chunk(self, audio_chunk: np.ndarray) -> bool:
+        """Prefer STT backend VAD; fallback to RMS."""
+        try:
+            fn = getattr(self.stt, "is_speech", None)
+            if callable(fn):
+                v = fn(audio_chunk)
+                if isinstance(v, bool):
+                    return v
+        except Exception:
+            pass
+        return not self._is_silent_chunk(audio_chunk)
 
 
     def _request_stop(self, reason: str) -> None:
@@ -412,12 +424,18 @@ class ParallelVoiceAssistant:
                 setattr(self, "_recorder_sample_rate", self.recorder.sample_rate)
 
                 
-                is_silent = self._is_silent_chunk(audio_chunk)
-                self._chunk_activity[chunk_id] = not is_silent
-               
-                if not is_silent:
+                is_speech = self._is_speech_chunk(audio_chunk)
+                self._chunk_activity[chunk_id] = is_speech
+
+                if is_speech:
                     self._register_activity()
-                    future = (self.stt.submit_chunk(audio_chunk, chunk_id))
+                    self._consecutive_silent_chunks = 0
+                else:
+                    self._handle_silent_audio_chunk()
+
+    
+                if is_speech or self._has_detected_speech:
+                    future = self.stt.submit_chunk(audio_chunk, chunk_id)
                 else:
                     future = self.stt.empty_future(chunk_id)
                 self.stt_futures.put((chunk_id, future, time.time()))
