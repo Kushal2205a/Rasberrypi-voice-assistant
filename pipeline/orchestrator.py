@@ -103,11 +103,7 @@ class ParallelVoiceAssistant:
         self.recorder = StreamingRecorder(chunk_duration=chunk_duration, sample_rate=sample_rate)
         
         
-        model_lite: str = MODEL_LITE,
-        model_pro: str = MODEL_PRO,
-        switch_codeword: str = SWITCH_CODEWORD,
-        switch_require_codeword: bool = SWITCH_REQUIRE_CODEWORD,
-        switch_reset_history: bool = True,
+       
         
         if whisper_server:
             # HTTP (persistent) STT

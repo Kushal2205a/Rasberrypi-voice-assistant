@@ -9,7 +9,7 @@ MODEL_LITE = os.getenv("MODEL_LITE", "qwen:0.5b")
 MODEL_PRO  = os.getenv("MODEL_PRO",  "alibayram/smollm3:latest")
 MODEL = os.getenv("OLLAMA_MODEL", MODEL_LITE)
 
-SWITCH_CODEWORD = os.getenv("SWITCH_CODEWORD", "PLACEHOLDER_CODEWORD").strip().lower()
+SWITCH_CODEWORD = os.getenv("SWITCH_CODEWORD", "hello").strip().lower()
 SWITCH_REQUIRE_CODEWORD = os.getenv("SWITCH_REQUIRE_CODEWORD", "0").strip() == "1"
 
 CHUNK_DURATION =  0.25
