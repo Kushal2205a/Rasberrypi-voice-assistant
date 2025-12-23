@@ -695,8 +695,8 @@ class ParallelVoiceAssistant:
             return False
         tokens = norm.split()
 
-        wants_pro = "pro" in tokens
-        wants_lite = ("lite" in tokens) or ("light" in tokens)  # STT often turns lite->light
+        wants_pro = "hello" in tokens
+        wants_lite = ("how" in tokens) or ("light" in tokens)  # STT often turns lite->light
         if not (wants_pro or wants_lite):
             return False
 
@@ -719,7 +719,7 @@ class ParallelVoiceAssistant:
         except Exception as exc:
             print(f"[Switch] Failed to switch model: {exc}")
             return False
-
+        os.environ["OLLAMA_MODEL"] = target_model
         print(f"[Switch] Model switched to {label}: {target_model}")
 
         # Speak a short confirmation so the user knows it worked.
