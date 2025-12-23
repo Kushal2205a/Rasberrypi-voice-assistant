@@ -90,6 +90,12 @@ class ParallelVoiceAssistant:
         silence_threshold: float = DEFAULT_SILENCE_THRESHOLD,
         whisper_server: Optional[str] = None,
         
+        model_lite: str = MODEL_LITE,
+        model_pro: str = MODEL_PRO,
+        switch_codeword: str = SWITCH_CODEWORD,
+        switch_require_codeword: bool = SWITCH_REQUIRE_CODEWORD,
+        switch_reset_history: bool = True,
+        
         
 
     ) -> None:
