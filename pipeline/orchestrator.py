@@ -7,7 +7,20 @@ import time
 
 import os, threading, queue, re, math, psutil, numpy as np 
 
-from config import CHUNK_DURATION, SAMPLE_RATE, WHISPER_EXE, WHISPER_MODEL, PIPER_MODEL_PATH, DEFAULT_SILENCE_THRESHOLD, DEFAULT_SILENCE_TIMEOUT, MODEL
+from config import (
+    CHUNK_DURATION,
+    SAMPLE_RATE,
+    WHISPER_EXE,
+    WHISPER_MODEL,
+    PIPER_MODEL_PATH,
+    DEFAULT_SILENCE_THRESHOLD,
+    DEFAULT_SILENCE_TIMEOUT,
+    MODEL,
+    MODEL_LITE,
+    MODEL_PRO,
+    SWITCH_CODEWORD,
+    SWITCH_REQUIRE_CODEWORD,
+)
 from recorder import StreamingRecorder
 """
 try:
@@ -83,6 +96,13 @@ class ParallelVoiceAssistant:
         self._chunk_duration = float(chunk_duration)
         self.recorder = StreamingRecorder(chunk_duration=chunk_duration, sample_rate=sample_rate)
         
+        
+        model_lite: str = MODEL_LITE,
+        model_pro: str = MODEL_PRO,
+        switch_codeword: str = SWITCH_CODEWORD,
+        switch_require_codeword: bool = SWITCH_REQUIRE_CODEWORD,
+        switch_reset_history: bool = True,
+        
         if whisper_server:
             # HTTP (persistent) STT
             from stt import ParallelSTTHTTP
@@ -103,13 +123,21 @@ class ParallelVoiceAssistant:
         self._stt_streaming = bool(getattr(self.stt, "IS_STREAMING", False))
         
         #self.llm = StreamingLLM(llama_kwargs=llama_kwargs)
+        initial_model = os.getenv("OLLAMA_MODEL") or (model_lite or MODEL)
         self.llm = OllamaStreamingLLM(
-        model=os.getenv("OLLAMA_MODEL", MODEL),
+        model=initial_model,
         host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
         keep_alive=os.getenv("LLM_KEEP_ALIVE", "30m"),
         num_ctx=int(os.getenv("OLLAMA_NUM_CTX", "256")),
         num_thread=int(os.getenv("OLLAMA_NUM_THREAD", "4")),
         )
+        
+        
+        self._model_lite = (model_lite or MODEL_LITE).strip()
+        self._model_pro = (model_pro or MODEL_PRO).strip()
+        self._switch_codeword = (switch_codeword or "").strip().lower()
+        self._switch_require_codeword = bool(switch_require_codeword)
+        self._switch_reset_history = bool(switch_reset_history)
 
         
         self.tts = BufferedTTS(
@@ -560,7 +588,8 @@ class ParallelVoiceAssistant:
 
             print(f"[STT] Chunk {res_chunk_id}: {text}")
 
-
+            if is_final and self._maybe_handle_model_switch(text):
+                continue
 
             llm_trigger_time = time.time()
             llm_future = self.llm.process_incremental(text, is_final=is_final)
@@ -647,6 +676,61 @@ class ParallelVoiceAssistant:
                     pass
 
                 segment_id += 1
+
+    def _maybe_handle_model_switch(self, text: str) -> bool:
+        """Detect and execute 'switch to pro/lite' commands from a transcript.
+
+        Rules (by default):
+          - Accept if transcript contains a switch-verb (switch/mode/model/change) AND pro|lite
+          - OR accept if it contains the configured codeword AND pro|lite
+          - If SWITCH_REQUIRE_CODEWORD is True, the codeword is mandatory.
+        """
+        if not text:
+            return False
+
+        norm = re.sub(r"[^a-z0-9\s]+", " ", text.lower()).strip()
+        if not norm:
+            return False
+        tokens = norm.split()
+
+        wants_pro = "pro" in tokens
+        wants_lite = ("lite" in tokens) or ("light" in tokens)  # STT often turns lite->light
+        if not (wants_pro or wants_lite):
+            return False
+
+        has_switch_verb = any(t in tokens for t in ("switch", "switched", "change", "mode", "model"))
+        has_codeword = bool(self._switch_codeword) and (self._switch_codeword in tokens)
+
+        if self._switch_require_codeword:
+            if not has_codeword:
+                return False
+        else:
+            # Require *some* command framing to avoid accidental triggers in normal speech.
+            if not (has_switch_verb or has_codeword):
+                return False
+
+        target_model = self._model_pro if wants_pro else self._model_lite
+        label = "Pro" if wants_pro else "Lite"
+
+        try:
+            self.llm.set_model(target_model, reset_history=self._switch_reset_history)
+        except Exception as exc:
+            print(f"[Switch] Failed to switch model: {exc}")
+            return False
+
+        print(f"[Switch] Model switched to {label}: {target_model}")
+
+        # Speak a short confirmation so the user knows it worked.
+        if getattr(self, "tts", None):
+            try:
+                fut = self.tts.generate_and_queue(f"Switched to {label} mode.", self._segment_id)
+                if fut is not None:
+                    self.stats.tts_segments += 1
+                    self._segment_id += 1
+            except Exception:
+                pass
+
+        return True
 
     def _on_tts_generated(self, future: Future, start_time: float, pending: PendingOutput) -> None:
         try:

@@ -2,8 +2,20 @@
 from pathlib import Path
 import os, argparse, RPi.GPIO as GPIO,time
 
-from config import CHUNK_DURATION, SAMPLE_RATE, WHISPER_EXE, WHISPER_MODEL, PIPER_MODEL_PATH, DEFAULT_SILENCE_THRESHOLD, DEFAULT_SILENCE_TIMEOUT
-from warmup import ModelPreloader
+from config import (
+    CHUNK_DURATION,
+    SAMPLE_RATE,
+    WHISPER_EXE,
+    WHISPER_MODEL,
+    PIPER_MODEL_PATH,
+    DEFAULT_SILENCE_THRESHOLD,
+    DEFAULT_SILENCE_TIMEOUT,
+    MODEL_LITE,
+    MODEL_PRO,
+    SWITCH_CODEWORD,
+    SWITCH_REQUIRE_CODEWORD,
+)
+
 from orchestrator import ParallelVoiceAssistant
 
 
@@ -77,6 +89,20 @@ def _parse_args() -> argparse.Namespace:
     
     parser.add_argument("--whisper-server", type=str, default=None, help="URL of whisper.cpp server, e.g. http://127.0.0.1:8080")
 
+    parser.add_argument("--model-lite", type=str, default=MODEL_LITE, help="Ollama model tag for Lite mode")
+    parser.add_argument("--model-pro", type=str, default=MODEL_PRO, help="Ollama model tag for Pro mode")
+    parser.add_argument("--switch-codeword", type=str, default=SWITCH_CODEWORD, help="Codeword for switching (placeholder ok)")
+    parser.add_argument(
+        "--switch-require-codeword",
+        action="store_true",
+        default=SWITCH_REQUIRE_CODEWORD,
+        help="Require codeword for switching (otherwise 'switch ... pro/lite' works too)",
+    )
+    parser.add_argument(
+        "--switch-keep-history",
+        action="store_true",
+        help="Do NOT reset chat history when switching models (default resets)",
+    )
     return parser.parse_args()
 
 
@@ -124,6 +150,11 @@ def main() -> None:
         silence_timeout=args.silence_timeout,
         whisper_server=args.whisper_server,
         silence_threshold=args.silence_threshold,
+        model_lite=args.model_lite,
+        model_pro=args.model_pro,
+        switch_codeword=args.switch_codeword,
+        switch_require_codeword=args.switch_require_codeword,
+        switch_reset_history=(not args.switch_keep_history),
     )
     max_duration = args.duration if args.duration and args.duration > 0 else None
     assistant.run(duration=max_duration)
