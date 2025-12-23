@@ -236,16 +236,29 @@ class ParallelVoiceAssistant:
         return rms < self._silence_threshold
 
     def _is_speech_chunk(self, audio_chunk: np.ndarray) -> bool:
-        """Prefer STT backend VAD; fallback to RMS."""
-        try:
-            fn = getattr(self.stt, "is_speech", None)
-            if callable(fn):
-                v = fn(audio_chunk)
-                if isinstance(v, bool):
-                    return v
-        except Exception:
-            pass
-        return not self._is_silent_chunk(audio_chunk)
+        # Cheap RMS first
+        if audio_chunk is None or audio_chunk.size == 0:
+            return False
+        audio_view = np.asarray(audio_chunk, dtype=np.int16).reshape(-1)
+        rms = float(np.sqrt(np.mean(np.square(audio_view.astype(np.float32)))))
+
+        # Hysteresis band around your threshold to avoid VAD calls most of the time
+        low = self._silence_threshold * 0.85
+        high = self._silence_threshold * 1.60
+
+        if rms < low:
+            return False
+        if rms > high:
+            return True
+
+        # Only now call VAD (expensive)
+        fn = getattr(self.stt, "is_speech", None)
+        if callable(fn):
+            v = fn(audio_chunk)
+            if isinstance(v, bool):
+                return v
+        return rms >= self._silence_threshold
+
 
 
     def _request_stop(self, reason: str) -> None:
@@ -537,9 +550,6 @@ class ParallelVoiceAssistant:
                 # Treat as silent/noise: increment silent-chunk logic and DO NOT feed to LLM
                 print(f"[STT] Chunk {res_chunk_id}: {text} (treated as noise/empty)")
                 self._reset_awaiting_transcript_state()
-                self._handle_silent_audio_chunk()
-                # We still want to surface the log, but skip registering activity and LLM trigger
-                # continue to next future
                 continue
 
             # Otherwise it's valid speech

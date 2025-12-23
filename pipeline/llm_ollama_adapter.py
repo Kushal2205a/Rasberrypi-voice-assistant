@@ -56,8 +56,8 @@ class OllamaStreamingLLM:
             "model": self.model,
             "messages": self._history + [{"role": "user", "content": prompt}],
             "stream": True,
+            "keep_alive": self.keep_alive,
             "options": {
-                "keep_alive": self.keep_alive,
                 "num_ctx": self.num_ctx,
                 "num_thread": self.num_thread,
                 "num_predict": self.num_predict,

@@ -89,7 +89,7 @@ class PersistentVoskSTT:
         self._state = _State(KaldiRecognizer(self._model, self._target_sr))
 
         # VAD (optional)
-        self._vad = webrtcvad.Vad(vad_aggressiveness) if _HAVE_VAD else None
+        self._vad = webrtcvad.Vad(vad_aggressiveness) if (_HAVE_VAD and vad_aggressiveness and vad_aggressiveness > 0) else None
         self._frame_ms = 20                      # VAD supports 10/20/30 ms
         self._bytes_per_sample = 2               # int16 mono
 
