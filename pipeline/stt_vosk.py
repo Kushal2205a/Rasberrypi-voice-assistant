@@ -81,6 +81,17 @@ class PersistentVoskSTT:
 
         self.executor = ThreadPoolExecutor(max_workers=max(2, num_workers))
         self.sample_rate = int(sample_rate)
+        
+        self._target_sr = 16000
+        import math 
+        # Pre-compute rational resample ratio (saves gcd per chunk)
+        g = math.gcd(self.sample_rate, self._target_sr)
+        self._rs_up = self._target_sr // g
+        self._rs_down = self.sample_rate // g
+
+        
+        
+        
         self.emit_partials = bool(emit_partials)
         self.finalizing = False
 
@@ -106,28 +117,33 @@ class PersistentVoskSTT:
     # -------- helpers --------
 
     def empty_future(self, chunk_id: int) -> Future:
-        return self.executor.submit(lambda cid=chunk_id: {"chunk_id": cid, "text": "", "is_final": False})
-
+        f: Future = Future()
+        f.set_result({"chunk_id": chunk_id, "text": "", "is_final": False})
+        return f
+    
+    
     def _resample_to_16k(self, audio_bytes: bytes) -> bytes:
+        if not audio_bytes:
+            return b""
         if self.sample_rate == self._target_sr:
             return audio_bytes
+
         # int16 -> float32 -> resample -> int16
         src = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
-        ratio = self._target_sr / float(self.sample_rate)
+
         if _HAVE_SCIPY:
-            # rational polyphase resample
-            import math as _m
-            g = _m.gcd(self.sample_rate, self._target_sr)
-            up, down = self._target_sr // g, self.sample_rate // g
-            dst = resample_poly(src, up, down)
+            dst = resample_poly(src, self._rs_up, self._rs_down)
         else:
+            ratio = self._target_sr / float(self.sample_rate)
             x = np.arange(src.shape[0], dtype=np.float32)
             xi = np.arange(0, src.shape[0], 1.0 / ratio, dtype=np.float32)
             if xi.size == 0:
                 return b""
             dst = np.interp(xi, x, src)
+
         dst = np.clip(dst, -32768.0, 32767.0).astype(np.int16)
         return dst.tobytes()
+
 
     def _vad_has_speech_16k(self, audio_16k: bytes) -> Optional[bool]:
         """Return True/False if VAD is enabled, None if disabled."""
@@ -239,6 +255,7 @@ class PersistentVoskSTT:
             with self._lock:
                 self._finalizing = False
                 self._inflight = False
+                self.finalizing = False
 
     # -------- public API --------
 

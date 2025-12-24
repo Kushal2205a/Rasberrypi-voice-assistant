@@ -118,10 +118,11 @@ class ParallelVoiceAssistant:
             self.stt = ParallelSTT(
                 num_workers=stt_workers,
                 sample_rate=sample_rate,
-                emit_partials=True,              # keep partials on (good for UX + LLM overlap)
-                vad_aggressiveness=0,            # 0..3, tune higher in noisy rooms
-                min_partial_interval_ms=120    
+                emit_partials=bool(emit_stt_partials),
+                vad_aggressiveness=0,  # 0..3
+                min_partial_interval_ms=250 if emit_stt_partials else 500,
             )
+
         self._stt_streaming = bool(getattr(self.stt, "IS_STREAMING", False))
         
         #self.llm = StreamingLLM(llama_kwargs=llama_kwargs)
@@ -131,7 +132,8 @@ class ParallelVoiceAssistant:
         host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
         keep_alive=os.getenv("LLM_KEEP_ALIVE", "30m"),
         num_ctx=int(os.getenv("OLLAMA_NUM_CTX", "256")),
-        num_thread=int(os.getenv("OLLAMA_NUM_THREAD", "4")),
+        num_thread=int(os.getenv("OLLAMA_NUM_THREAD") or str(max(1, min(2, (os.cpu_count() or 4) // 2)))),
+
         )
         
         
@@ -695,8 +697,8 @@ class ParallelVoiceAssistant:
             return False
         tokens = norm.split()
 
-        wants_pro = "hello" in tokens
-        wants_lite = ("how" in tokens) or ("light" in tokens)  # STT often turns lite->light
+        wants_pro = "smart" in tokens
+        wants_lite = ("fast" in tokens) or ("faster" in tokens)  # STT often turns lite->light
         if not (wants_pro or wants_lite):
             return False
 
