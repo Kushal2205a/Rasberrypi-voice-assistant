@@ -1,9 +1,14 @@
 # pipeline/stt_vosk.py
 from __future__ import annotations
-from typing import Optional, Any, Dict
+
+from typing import Optional, Any, Dict, List
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-import threading, time, os, json, math
+import threading
+import time
+import json
+import math
+
 import numpy as np
 
 # Optional fast resampler (highly recommended on Pi)
@@ -13,7 +18,7 @@ try:
 except Exception:
     _HAVE_SCIPY = False
 
-# Optional VAD: lightweight and accurate (+great for endpointing)
+# Optional VAD: lightweight and accurate (+good for endpointing)
 try:
     import webrtcvad
     _HAVE_VAD = True
@@ -38,6 +43,7 @@ except Exception:
 _SHARED_MODEL = None
 _SHARED_LOCK = threading.Lock()
 
+
 def _get_vosk_model(model_path: Path) -> VoskModel:
     global _SHARED_MODEL
     if _SHARED_MODEL is None:
@@ -51,8 +57,8 @@ def _get_vosk_model(model_path: Path) -> VoskModel:
 @dataclass
 class _State:
     recognizer: KaldiRecognizer
-    stable_text: str = ""       # accumulated finalized segments
-    last_partial: str = ""      # to dedup partial emissions
+    stable_text: str = ""   # accumulated finalized segments
+    last_partial: str = ""  # to dedup partial emissions
 
 
 class PersistentVoskSTT:
@@ -63,6 +69,10 @@ class PersistentVoskSTT:
       - finalize(chunk_id: int, mark_final: bool=True) -> Future[...]
       - empty_future(chunk_id) -> Future[...]
       - reset(), shutdown()
+
+    Design notes:
+      - Single-flight gating: Vosk recognizer isn't thread-safe, so we ensure only one decode runs at once.
+      - We buffer audio when busy so we don't drop words.
     """
 
     def __init__(
@@ -70,48 +80,49 @@ class PersistentVoskSTT:
         num_workers: int = 2,
         sample_rate: int = SAMPLE_RATE,   # recorder/mic rate (e.g., 44100)
         emit_partials: bool = True,
-        # Optional knobs (ignored by faster-whisper, included here)
         vad_aggressiveness: int = 2,      # 0..3; higher = more aggressive
         min_partial_interval_ms: int = 120,
         model_path: Optional[Path] = None,
-        **_ignore: Any,                   # ignore whisper-specific kwargs
+        **_ignore: Any,
     ) -> None:
         if VoskModel is None or KaldiRecognizer is None:
             raise RuntimeError(f"vosk is not installed: {_vosk_import_err}")
 
+        # Thread pool exists, but we still enforce single-flight with locks.
         self.executor = ThreadPoolExecutor(max_workers=max(2, num_workers))
+
         self.sample_rate = int(sample_rate)
-        
-        self._target_sr = 16000
-        import math 
+        self._target_sr = 16000  # Vosk expects 16k
+
         # Pre-compute rational resample ratio (saves gcd per chunk)
         g = math.gcd(self.sample_rate, self._target_sr)
         self._rs_up = self._target_sr // g
         self._rs_down = self.sample_rate // g
 
-        
-        
-        
         self.emit_partials = bool(emit_partials)
         self.finalizing = False
 
-        self._target_sr = 16000                  # Vosk expects 16k
         self._model = _get_vosk_model(Path(model_path or VOSK_MODEL_PATH))
         self._state = _State(KaldiRecognizer(self._model, self._target_sr))
 
         # VAD (optional)
-        self._vad = webrtcvad.Vad(vad_aggressiveness) if (_HAVE_VAD and vad_aggressiveness and vad_aggressiveness > 0) else None
-        self._frame_ms = 20                      # VAD supports 10/20/30 ms
-        self._bytes_per_sample = 2               # int16 mono
+        self._vad = (
+            webrtcvad.Vad(vad_aggressiveness)
+            if (_HAVE_VAD and vad_aggressiveness and vad_aggressiveness > 0)
+            else None
+        )
+        self._frame_ms = 20
+        self._bytes_per_sample = 2  # int16 mono
 
         # throttle partial emissions to avoid spam / extra CPU
         self._last_partial_time = 0.0
-        self._min_partial_interval = min_partial_interval_ms / 1000.0
+        self._min_partial_interval = (min_partial_interval_ms or 0) / 1000.0
 
         # single-flight gate (avoid overlapping decodes)
         self._lock = threading.Lock()
         self._inflight = False
-        
+
+        # audio buffered when STT is busy
         self._pending = bytearray()
 
     # -------- helpers --------
@@ -120,15 +131,13 @@ class PersistentVoskSTT:
         f: Future = Future()
         f.set_result({"chunk_id": chunk_id, "text": "", "is_final": False})
         return f
-    
-    
+
     def _resample_to_16k(self, audio_bytes: bytes) -> bytes:
         if not audio_bytes:
             return b""
         if self.sample_rate == self._target_sr:
             return audio_bytes
 
-        # int16 -> float32 -> resample -> int16
         src = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
 
         if _HAVE_SCIPY:
@@ -144,41 +153,42 @@ class PersistentVoskSTT:
         dst = np.clip(dst, -32768.0, 32767.0).astype(np.int16)
         return dst.tobytes()
 
+    def decode_grammar(self, audio_chunk: np.ndarray, phrases: List[str]) -> str:
+        """
+        One-off decode against a restricted grammar.
 
-    def _vad_has_speech_16k(self, audio_16k: bytes) -> Optional[bool]:
-        """Return True/False if VAD is enabled, None if disabled."""
-        if not self._vad:
-            return None
-
-        frame_len = int(self._target_sr * (self._frame_ms / 1000.0))
-        step = frame_len * self._bytes_per_sample
-
-        for i in range(0, len(audio_16k), step):
-            frame = audio_16k[i:i + step]
-            if len(frame) < step:
-                break
-            if self._vad.is_speech(frame, self._target_sr):
-                return True
-        return False
-
-    def is_speech(self, audio_chunk: np.ndarray) -> Optional[bool]:
-        """Public helper for orchestrator: speech or not (endpointing only)."""
-        if audio_chunk is None or audio_chunk.size == 0:
-            return False
-        if not self._vad:
-            return None
-
+        Used as a "second pass" for command phrases like
+        "switch to smart" / "switch to fast" when open-vocab decode is noisy.
+        """
+        if audio_chunk is None or audio_chunk.size == 0 or not phrases:
+            return ""
         audio_bytes = np.ascontiguousarray(audio_chunk, dtype=np.int16).tobytes()
         audio_16k = self._resample_to_16k(audio_bytes)
         if not audio_16k:
-            return False
-        return self._vad_has_speech_16k(audio_16k)
+            return ""
 
+        grammar = json.dumps(phrases)
+        try:
+            recog = KaldiRecognizer(self._model, self._target_sr, grammar)
+        except TypeError:
+            # older vosk builds
+            recog = KaldiRecognizer(self._model, self._target_sr)
+            try:
+                recog.SetGrammar(grammar)
+            except Exception:
+                pass
+
+        recog.AcceptWaveform(audio_16k)
+        try:
+            res = json.loads(recog.FinalResult() or "{}")
+        except Exception:
+            return ""
+        return (res.get("text") or "").strip()
 
     def _feed_and_read(self, audio_16k: bytes) -> Dict[str, Any]:
         recog = self._state.recognizer
-        # Feed (possibly VAD-filtered) frames
         had_final = bool(recog.AcceptWaveform(audio_16k))
+
         if had_final:
             res = json.loads(recog.Result() or "{}")
             seg = (res.get("text") or "").strip()
@@ -186,10 +196,8 @@ class PersistentVoskSTT:
                 if self._state.stable_text:
                     self._state.stable_text += " "
                 self._state.stable_text += seg
+                had_final = True
 
-                had_final = True  # a segment finalized
-
-        # If no segment finalized, get partial
         partial_out = ""
         if not had_final and self.emit_partials:
             now = time.time()
@@ -197,7 +205,6 @@ class PersistentVoskSTT:
                 pres = json.loads(recog.PartialResult() or "{}")
                 partial = (pres.get("partial") or "").strip()
                 full = (self._state.stable_text + (" " + partial if partial else "")).strip()
-                # de-dup
                 if full and full != self._state.last_partial:
                     partial_out = full
                     self._state.last_partial = full
@@ -211,10 +218,9 @@ class PersistentVoskSTT:
         try:
             audio_16k = self._resample_to_16k(audio_bytes)
             out = self._feed_and_read(audio_16k)
+
             if out["had_final"]:
-                # We have extended stable_text, but don't declare utterance final here.
-                txt = self._state.stable_text
-                return {"chunk_id": chunk_id, "text": txt, "is_final": False}
+                return {"chunk_id": chunk_id, "text": self._state.stable_text, "is_final": False}
             if out["partial_text"]:
                 return {"chunk_id": chunk_id, "text": out["partial_text"], "is_final": False}
             return {"chunk_id": chunk_id, "text": "", "is_final": False}
@@ -224,7 +230,7 @@ class PersistentVoskSTT:
 
     def _finalize_worker(self, chunk_id: int, mark_final: bool) -> Dict[str, Any]:
         try:
-            # 🔹 Consume any audio we buffered while the worker was busy
+            # Consume any audio buffered while the worker was busy
             with self._lock:
                 leftover = bytes(self._pending)
                 self._pending.clear()
@@ -250,12 +256,10 @@ class PersistentVoskSTT:
             # Reset recognizer for next utterance
             self._state = _State(KaldiRecognizer(self._model, self._target_sr))
             return {"chunk_id": chunk_id, "text": text, "is_final": bool(mark_final)}
-
         finally:
             with self._lock:
-                self._finalizing = False
-                self._inflight = False
                 self.finalizing = False
+                self._inflight = False
 
     # -------- public API --------
 
@@ -263,14 +267,15 @@ class PersistentVoskSTT:
         audio_bytes = np.ascontiguousarray(audio_chunk, dtype=np.int16).tobytes()
         with self._lock:
             if self.finalizing or self._inflight:
-                # ⇨ do not lose audio when busy
                 self._pending.extend(audio_bytes)
                 return self.empty_future(chunk_id)
-            # prepend anything we buffered while busy
+
             if self._pending:
                 audio_bytes = bytes(self._pending) + audio_bytes
                 self._pending.clear()
+
             self._inflight = True
+
         return self.executor.submit(self._partial_worker, chunk_id, audio_bytes)
 
     def finalize(self, chunk_id: int, mark_final: bool = True) -> Optional[Future]:
@@ -282,6 +287,8 @@ class PersistentVoskSTT:
         with self._lock:
             self._state = _State(KaldiRecognizer(self._model, self._target_sr))
             self._inflight = False
+            self.finalizing = False
+            self._pending.clear()
             self._last_partial_time = 0.0
 
     def shutdown(self) -> None:

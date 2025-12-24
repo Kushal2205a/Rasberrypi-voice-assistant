@@ -6,16 +6,21 @@ from typing import Optional
 import numpy as np
 import sounddevice as sd
 
-from config import CHUNK_DURATION, SAMPLE_RATE, INPUT_DEVICE
+from config import CHUNK_DURATION, SAMPLE_RATE
+
+try:
+    from config import INPUT_DEVICE  # optional
+except Exception:
+    INPUT_DEVICE = None
 
 
 class StreamingRecorder:
     """
     Capture mic input continuously and emit fixed-size int16 mono chunks.
 
-    Key improvement:
-      - Uses a PortAudio callback so audio is pulled promptly even if the main thread is busy.
-      - Reduces PortAudio "input overflow" issues on Pi under load.
+    Notes for Pi:
+      - Use a PortAudio callback so we don't miss audio when other threads are busy.
+      - Keep the callback *very* light (no numpy work) to reduce "input overflow".
     """
 
     def __init__(
@@ -30,15 +35,18 @@ class StreamingRecorder:
         self.input_device = input_device
         self.latency = latency
 
-        self.chunk_queue: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=32)
+        # Queue holds raw bytes; conversion to numpy happens in get_chunk().
+        self.chunk_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=64)
+
         self.recording = False
         self._thread: Optional[threading.Thread] = None
 
         self._buf = bytearray()
         self._buf_lock = threading.Lock()
 
-        # A stable callback block size (50ms) works well on Pi
-        self._cb_blocksize = max(256, int(self.sample_rate * min(0.05, self.chunk_duration)))
+        # Larger blocks => fewer callbacks => fewer overflows on a busy Pi.
+        # 100ms is a good compromise for command + conversation.
+        self._cb_blocksize = max(256, int(self.sample_rate * min(0.10, self.chunk_duration)))
 
         self._last_status_log = 0.0
 
@@ -55,7 +63,6 @@ class StreamingRecorder:
 
         def callback(indata: np.ndarray, frames: int, time_info, status) -> None:
             if status:
-                # log at most twice/sec
                 now = time.time()
                 if now - self._last_status_log >= 0.5:
                     print(f"[REC] Audio status: {status}")
@@ -64,26 +71,25 @@ class StreamingRecorder:
             if not self.recording:
                 return
 
-            b = indata.tobytes()
+            b = indata.tobytes()  # int16 mono
             with self._buf_lock:
                 self._buf.extend(b)
 
+                # Cut full chunks out of the buffer and enqueue them.
                 while len(self._buf) >= chunk_bytes:
                     payload = bytes(self._buf[:chunk_bytes])
                     del self._buf[:chunk_bytes]
 
-                    chunk = np.frombuffer(payload, dtype=np.int16).reshape(-1, 1)
-
-                    # never block callback; drop oldest if queue is full
+                    # Never block the audio callback; drop oldest if the queue is full.
                     try:
-                        self.chunk_queue.put_nowait(chunk)
+                        self.chunk_queue.put_nowait(payload)
                     except queue.Full:
                         try:
                             _ = self.chunk_queue.get_nowait()
                         except queue.Empty:
                             pass
                         try:
-                            self.chunk_queue.put_nowait(chunk)
+                            self.chunk_queue.put_nowait(payload)
                         except queue.Full:
                             pass
 
@@ -101,9 +107,13 @@ class StreamingRecorder:
 
     def get_chunk(self, timeout: float = 0.5) -> Optional[np.ndarray]:
         try:
-            return self.chunk_queue.get(timeout=timeout)
+            payload = self.chunk_queue.get(timeout=timeout)
         except queue.Empty:
             return None
+
+        # Convert raw bytes -> (N, 1) int16
+        chunk = np.frombuffer(payload, dtype=np.int16).reshape(-1, 1)
+        return chunk
 
     def clear_queue(self) -> None:
         try:

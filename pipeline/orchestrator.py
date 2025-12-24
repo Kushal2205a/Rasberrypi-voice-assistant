@@ -5,7 +5,6 @@ from collections import deque
 from concurrent.futures import Future
 import time 
 
-
 import os, threading, queue, re, math, psutil, numpy as np 
 
 from config import (
@@ -101,8 +100,6 @@ class ParallelVoiceAssistant:
 
     ) -> None:
         self._chunk_duration = float(chunk_duration)
-        self._preroll_seconds = 0.50  # 0.25–0.75 is a good range
-        self._preroll_chunks = deque(maxlen=max(1, int(self._preroll_seconds / max(0.01, self._chunk_duration))))
         self.recorder = StreamingRecorder(chunk_duration=chunk_duration, sample_rate=sample_rate)
         
         
@@ -121,11 +118,10 @@ class ParallelVoiceAssistant:
             self.stt = ParallelSTT(
                 num_workers=stt_workers,
                 sample_rate=sample_rate,
-                emit_partials=bool(emit_stt_partials),
-                vad_aggressiveness=0,  # 0..3
-                min_partial_interval_ms=250 if emit_stt_partials else 500,
+                emit_partials=True,              # keep partials on (good for UX + LLM overlap)
+                vad_aggressiveness=0,            # 0..3, tune higher in noisy rooms
+                min_partial_interval_ms=120    
             )
-
         self._stt_streaming = bool(getattr(self.stt, "IS_STREAMING", False))
         
         #self.llm = StreamingLLM(llama_kwargs=llama_kwargs)
@@ -135,8 +131,7 @@ class ParallelVoiceAssistant:
         host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
         keep_alive=os.getenv("LLM_KEEP_ALIVE", "30m"),
         num_ctx=int(os.getenv("OLLAMA_NUM_CTX", "256")),
-        num_thread=int(os.getenv("OLLAMA_NUM_THREAD") or str(max(1, min(2, (os.cpu_count() or 4) // 2)))),
-
+        num_thread=int(os.getenv("OLLAMA_NUM_THREAD", "4")),
         )
         
         
@@ -145,6 +140,14 @@ class ParallelVoiceAssistant:
         self._switch_codeword = (switch_codeword or "").strip().lower()
         self._switch_require_codeword = bool(switch_require_codeword)
         self._switch_reset_history = bool(switch_reset_history)
+
+        # --- Command (model switch) audio buffer ---
+        # Keep a short rolling window of raw audio so we can re-decode switch commands with a restricted grammar.
+        self._cmd_audio_window_s = 2.5
+        self._cmd_audio: Deque[np.ndarray] = deque(
+            maxlen=max(1, int(self._cmd_audio_window_s / max(0.01, self._chunk_duration)))
+        )
+
 
         
         self.tts = BufferedTTS(
@@ -355,6 +358,7 @@ class ParallelVoiceAssistant:
 
         self._stt_done.clear()
         self._activity_event.clear()
+        self._cmd_audio.clear()
         with self._activity_lock:
             self._has_detected_speech = False
             self._last_voice_time = start_time
@@ -463,6 +467,10 @@ class ParallelVoiceAssistant:
                     self._process_stt_results(wait=False)
                     continue
 
+                # keep raw audio for command re-decode
+                self._cmd_audio.append(audio_chunk.copy())
+
+
                 if self._stop_requested and not self.recorder.recording:
                     self.recorder.clear_queue()
                     self._process_stt_results(wait=False)
@@ -472,22 +480,8 @@ class ParallelVoiceAssistant:
                 setattr(self, "_recorder_sample_rate", self.recorder.sample_rate)
 
                 
-                # Determine speech FIRST, but keep a pre-roll of audio before first speech
                 is_speech = self._is_speech_chunk(audio_chunk)
-                was_in_speech = self._has_detected_speech
-                first_speech = is_speech and not was_in_speech
-
                 self._chunk_activity[chunk_id] = is_speech
-
-                if first_speech:
-                    # prepend buffered pre-roll to preserve consonant onsets
-                    if self._preroll_chunks:
-                        audio_chunk = np.concatenate(list(self._preroll_chunks) + [audio_chunk], axis=0)
-                        self._preroll_chunks.clear()
-
-                if not was_in_speech and not is_speech:
-                    # still before speech: keep pre-roll instead of discarding
-                    self._preroll_chunks.append(audio_chunk.copy())
 
                 if is_speech:
                     self._register_activity()
@@ -495,16 +489,11 @@ class ParallelVoiceAssistant:
                 else:
                     self._handle_silent_audio_chunk()
 
-                # Feed STT once speech begins; also feed the first speech chunk (with pre-roll)
-                if is_speech or self._has_detected_speech or first_speech:
+    
+                if is_speech or self._has_detected_speech:
                     future = self.stt.submit_chunk(audio_chunk, chunk_id)
                 else:
                     future = self.stt.empty_future(chunk_id)
-
-                    
-                    
-                    
-                    
                 self.stt_futures.put((chunk_id, future, time.time()))
                 self.stats.stt_chunks += 1
                 chunk_id += 1
@@ -703,6 +692,38 @@ class ParallelVoiceAssistant:
 
                 segment_id += 1
 
+
+    def _decode_switch_command_from_audio(self) -> str:
+        """Second-pass decode for switch commands using a restricted Vosk grammar."""
+        try:
+            chunks = list(self._cmd_audio)
+            if not chunks:
+                return ""
+            audio = np.concatenate(chunks, axis=0)
+        except Exception:
+            return ""
+
+        # Limit to the last N seconds
+        try:
+            max_samples = int(self.recorder.sample_rate * float(self._cmd_audio_window_s))
+            if audio.shape[0] > max_samples:
+                audio = audio[-max_samples:]
+        except Exception:
+            pass
+
+        grammar = [
+            "switch to smart", "switch smart",
+            "switch to fast", "switch fast",
+            "switch to pro", "switch pro",
+            "switch to lite", "switch lite",
+            "smart", "fast", "pro", "lite", "switch",
+        ]
+
+        fn = getattr(self.stt, "decode_grammar", None)
+        if callable(fn):
+            return (fn(audio, grammar) or "").strip()
+        return ""
+
     def _maybe_handle_model_switch(self, text: str) -> bool:
         """Detect and execute 'switch to pro/lite' commands from a transcript.
 
@@ -718,11 +739,8 @@ class ParallelVoiceAssistant:
         if not norm:
             return False
         tokens = norm.split()
-
-        wants_pro = "smart" in tokens
-        wants_lite = ("fast" in tokens) or ("faster" in tokens)  # STT often turns lite->light
-        if not (wants_pro or wants_lite):
-            return False
+        wants_pro = ("smart" in tokens) or ("pro" in tokens)
+        wants_lite = ("fast" in tokens) or ("faster" in tokens) or ("lite" in tokens) or ("light" in tokens)
 
         has_switch_verb = any(t in tokens for t in ("switch", "switched", "change", "mode", "model"))
         has_codeword = bool(self._switch_codeword) and (self._switch_codeword in tokens)
@@ -735,6 +753,17 @@ class ParallelVoiceAssistant:
             if not (has_switch_verb or has_codeword):
                 return False
 
+        # If open-vocab decode didn't confidently capture smart/fast, try a restricted-grammar re-decode.
+        if not (wants_pro or wants_lite):
+            decoded = self._decode_switch_command_from_audio()
+            if decoded:
+                norm2 = re.sub(r"[^a-z0-9\s]+", " ", decoded.lower()).strip()
+                t2 = norm2.split()
+                wants_pro = ("smart" in t2) or ("pro" in t2)
+                wants_lite = ("fast" in t2) or ("faster" in t2) or ("lite" in t2) or ("light" in t2)
+
+        if not (wants_pro or wants_lite):
+            return False
         target_model = self._model_pro if wants_pro else self._model_lite
         label = "Pro" if wants_pro else "Lite"
 
