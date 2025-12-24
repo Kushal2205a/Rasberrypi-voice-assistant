@@ -5,6 +5,7 @@ from collections import deque
 from concurrent.futures import Future
 import time 
 
+
 import os, threading, queue, re, math, psutil, numpy as np 
 
 from config import (
@@ -100,6 +101,8 @@ class ParallelVoiceAssistant:
 
     ) -> None:
         self._chunk_duration = float(chunk_duration)
+        self._preroll_seconds = 0.50  # 0.25–0.75 is a good range
+        self._preroll_chunks = deque(maxlen=max(1, int(self._preroll_seconds / max(0.01, self._chunk_duration))))
         self.recorder = StreamingRecorder(chunk_duration=chunk_duration, sample_rate=sample_rate)
         
         
@@ -469,8 +472,22 @@ class ParallelVoiceAssistant:
                 setattr(self, "_recorder_sample_rate", self.recorder.sample_rate)
 
                 
+                # Determine speech FIRST, but keep a pre-roll of audio before first speech
                 is_speech = self._is_speech_chunk(audio_chunk)
+                was_in_speech = self._has_detected_speech
+                first_speech = is_speech and not was_in_speech
+
                 self._chunk_activity[chunk_id] = is_speech
+
+                if first_speech:
+                    # prepend buffered pre-roll to preserve consonant onsets
+                    if self._preroll_chunks:
+                        audio_chunk = np.concatenate(list(self._preroll_chunks) + [audio_chunk], axis=0)
+                        self._preroll_chunks.clear()
+
+                if not was_in_speech and not is_speech:
+                    # still before speech: keep pre-roll instead of discarding
+                    self._preroll_chunks.append(audio_chunk.copy())
 
                 if is_speech:
                     self._register_activity()
@@ -478,11 +495,16 @@ class ParallelVoiceAssistant:
                 else:
                     self._handle_silent_audio_chunk()
 
-    
-                if is_speech or self._has_detected_speech:
+                # Feed STT once speech begins; also feed the first speech chunk (with pre-roll)
+                if is_speech or self._has_detected_speech or first_speech:
                     future = self.stt.submit_chunk(audio_chunk, chunk_id)
                 else:
                     future = self.stt.empty_future(chunk_id)
+
+                    
+                    
+                    
+                    
                 self.stt_futures.put((chunk_id, future, time.time()))
                 self.stats.stt_chunks += 1
                 chunk_id += 1

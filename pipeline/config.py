@@ -17,13 +17,13 @@ MODEL = os.getenv("OLLAMA_MODEL", MODEL_LITE)
 SWITCH_CODEWORD = os.getenv("SWITCH_CODEWORD", "hello").strip().lower()
 SWITCH_REQUIRE_CODEWORD = os.getenv("SWITCH_REQUIRE_CODEWORD", "0").strip() == "1"
 
-CHUNK_DURATION = 0.25
+CHUNK_DURATION = 1.0
 
-DEFAULT_SILENCE_TIMEOUT = 1.0        # seconds
-DEFAULT_SILENCE_THRESHOLD = 900.0      # RMS amplitude threshold
+DEFAULT_SILENCE_TIMEOUT = 1.2      # seconds
+DEFAULT_SILENCE_THRESHOLD = 1000.0      # RMS amplitude threshold
 
 WHISPER_EXE = Path.home() / "whisper.cpp" / "build" / "bin" / "whisper-cli"
-WHISPER_MODEL = Path.home() / "whisper.cpp" / "models" / "ggml-tiny.bin"  # ✅ removed trailing "\"
+WHISPER_MODEL = Path.home() / "whisper.cpp" / "models" / "ggml-tiny.bin"  
 
 VOSK_MODEL_PATH = Path.home() / "models" / "vosk-model-en-in-0.5"
 
