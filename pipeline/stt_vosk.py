@@ -104,6 +104,9 @@ class PersistentVoskSTT:
 
         self._model = _get_vosk_model(Path(model_path or VOSK_MODEL_PATH))
         self._state = _State(KaldiRecognizer(self._model, self._target_sr))
+        
+        
+        
 
         # VAD (optional)
         self._vad = (
@@ -124,6 +127,42 @@ class PersistentVoskSTT:
 
         # audio buffered when STT is busy
         self._pending = bytearray()
+        
+        # VAD 
+        self._vad_in_speech = False
+        self._vad_speech_frames = 0
+        self._vad_silence_frames = 0
+
+        # keep a little audio before speech is detected, so we don't clip first phonemes
+        self._vad_preroll = bytearray()
+        self._vad_preroll_ms = 200
+        self._vad_preroll_frames = max(0, int(self._vad_preroll_ms / self._frame_ms))
+
+        # how long silence until we consider speech "ended" (used for trimming)
+        self._vad_end_silence_ms = 700
+        self._vad_end_silence_frames = max(1, int(self._vad_end_silence_ms / self._frame_ms))
+
+        # require a tiny amount of consecutive speech before entering "in speech"
+        self._vad_min_speech_ms = 60
+        self._vad_min_speech_frames = max(1, int(self._vad_min_speech_ms / self._frame_ms))
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
 
     # -------- helpers --------
 
@@ -187,7 +226,15 @@ class PersistentVoskSTT:
 
     def _feed_and_read(self, audio_16k: bytes) -> Dict[str, Any]:
         recog = self._state.recognizer
-        had_final = bool(recog.AcceptWaveform(audio_16k))
+        frame_bytes = int(self._target_sr * (self._frame_ms / 1000.0)) * self._bytes_per_sample
+        had_final = False
+
+        for i in range(0, len(audio_16k), frame_bytes):
+            frame = audio_16k[i:i + frame_bytes]
+            if len(frame) < frame_bytes:
+                break
+            if recog.AcceptWaveform(frame):
+                had_final = True
 
         if had_final:
             res = json.loads(recog.Result() or "{}")

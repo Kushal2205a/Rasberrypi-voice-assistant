@@ -85,6 +85,7 @@ def _parse_args() -> argparse.Namespace:
         "--enable-stt-partials",
         action="store_true",
         help="Run whisper.cpp on each chunk for incremental transcripts",
+        default = True 
     )
     
     parser.add_argument("--whisper-server", type=str, default=None, help="URL of whisper.cpp server, e.g. http://127.0.0.1:8080")
