@@ -95,12 +95,11 @@ class ParallelVoiceAssistant:
         switch_codeword: str = SWITCH_CODEWORD,
         switch_require_codeword: bool = SWITCH_REQUIRE_CODEWORD,
         switch_reset_history: bool = True,
-        
-        
+        _recorder=None,  # optional pre-built StreamingRecorder (e.g. push-mode for SharedMicStream)
 
     ) -> None:
         self._chunk_duration = float(chunk_duration)
-        self.recorder = StreamingRecorder(chunk_duration=chunk_duration, sample_rate=sample_rate)
+        self.recorder = _recorder if _recorder is not None else StreamingRecorder(chunk_duration=chunk_duration, sample_rate=sample_rate)
         
         
        

@@ -29,3 +29,5 @@ VOSK_MODEL_PATH = Path.home() / "models" / "vosk-model-en-in-0.5"
 
 PIPER_MODEL_PATH = Path.home() / "Rasberrypi-voice-assistant" / "voices" / "en_US-amy-medium.onnx"
 WHISPER_SERVER_URL = "http://127.0.0.1:8080"
+WAKE_WORD       = os.getenv("WAKE_WORD", "hey_jarvis")
+WAKE_THRESHOLD  = float(os.getenv("WAKE_THRESHOLD", "0.5"))
