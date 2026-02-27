@@ -693,6 +693,32 @@ class ParallelVoiceAssistant:
                 segment_id += 1
 
 
+    def _queue_tts_confirmation(self, text: str) -> None:
+        """Queue a TTS confirmation and properly track the future so _wait_for_tts_completion waits for it."""
+        if not getattr(self, "tts", None):
+            return
+        try:
+            submit_time = time.time()
+            fut = self.tts.generate_and_queue(text, self._segment_id)
+            if fut is None:
+                return
+            self.stats.tts_segments += 1
+            self._segment_id += 1
+
+            pending_ts = self._reference_timestamp_for_output(submit_time)
+            pending = PendingOutput(timestamp=pending_ts, segments_expected=1)
+            with self._pending_lock:
+                self.stats.pending_outputs.append(pending)
+
+            with self._tts_futures_lock:
+                self._pending_tts_futures.add(fut)
+
+            fut.add_done_callback(
+                lambda f, start=submit_time, p=pending: self._on_tts_generated(f, start, p)
+            )
+        except Exception:
+            pass
+
     def _decode_switch_command_from_audio(self) -> str:
         """Second-pass decode for switch commands using a restricted Vosk grammar."""
         try:
@@ -739,6 +765,28 @@ class ParallelVoiceAssistant:
         if not norm:
             return False
         tokens = norm.split()
+    
+        if tokens and tokens[0] == "switch":
+            current = (self.llm.get_model() or "").strip() if hasattr(self.llm, "get_model") else os.getenv("OLLAMA_MODEL", "")
+            current = (current or "").strip()
+
+        
+            if current == self._model_pro:
+                target_model, label = self._model_lite, "Lite"
+            else:
+                target_model, label = self._model_pro, "Pro"
+
+            try:
+                self.llm.set_model(target_model, reset_history=self._switch_reset_history)
+            except Exception as exc:
+                print(f"[Switch] Failed to switch model: {exc}")
+                return False
+
+            os.environ["OLLAMA_MODEL"] = target_model
+            print(f"[Switch] Model toggled to {label}: {target_model}")
+
+            self._queue_tts_confirmation(f'Switched to "{target_model}".')
+            return True
         wants_pro = ("smart" in tokens) or ("pro" in tokens)
         wants_lite = ("fast" in tokens) or ("faster" in tokens) or ("lite" in tokens) or ("light" in tokens)
 
@@ -776,15 +824,7 @@ class ParallelVoiceAssistant:
         print(f"[Switch] Model switched to {label}: {target_model}")
 
         # Speak a short confirmation so the user knows it worked.
-        if getattr(self, "tts", None):
-            try:
-                fut = self.tts.generate_and_queue(f"Switched to {label} mode.", self._segment_id)
-                if fut is not None:
-                    self.stats.tts_segments += 1
-                    self._segment_id += 1
-            except Exception:
-                pass
-
+        self._queue_tts_confirmation(f'Switched to "{target_model}".')
         return True
 
     def _on_tts_generated(self, future: Future, start_time: float, pending: PendingOutput) -> None:
@@ -981,7 +1021,8 @@ class ParallelVoiceAssistant:
 
             queue_empty = self.tts.speech_queue.empty()
 
-            if pending_futures == 0 and pending_outputs == 0 and queue_empty:
+            playing_audio = bool(getattr(self.tts, "is_playing_audio", lambda: False)())
+            if pending_futures == 0 and pending_outputs == 0 and queue_empty and not playing_audio:
                 break
 
             if time.time() >= deadline:

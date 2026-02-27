@@ -51,6 +51,7 @@ class BufferedTTS:
         self.speech_queue: "queue.Queue[SpeechSegment]" = queue.Queue()
         self.executor = ThreadPoolExecutor(max_workers=2)
         self.playing = False
+        self._playing_audio = threading.Event()
         self._playback_thread: Optional[threading.Thread] = None
         self.use_subprocess = bool(use_subprocess)
 
@@ -208,16 +209,20 @@ class BufferedTTS:
             if not segment:
                 continue
 
-            played = False
-            if not self.use_subprocess:
-                played = self._play_via_sounddevice(segment)
+            self._playing_audio.set()
+            try:
+                played = False
+                if not self.use_subprocess:
+                    played = self._play_via_sounddevice(segment)
 
-            if not played and self.playback_cmd:
-                played = self._play_via_subprocess(segment)
+                if not played and self.playback_cmd:
+                    played = self._play_via_subprocess(segment)
 
-            if not played:
-                print(f"[TTS] Playback failed for {segment.path}")
-                self._notify_playback_error()
+                if not played:
+                    print(f"[TTS] Playback failed for {segment.path}")
+                    self._notify_playback_error()
+            finally:
+                self._playing_audio.clear()
 
             try:
                 if segment.path:
@@ -225,7 +230,8 @@ class BufferedTTS:
 
             except OSError:
                 pass
-
+    def is_playing_audio(self) -> bool:
+        return self._playing_audio.is_set()
     def _notify_playback_error(self) -> None:
         if self.on_playback_error is None:
             return
