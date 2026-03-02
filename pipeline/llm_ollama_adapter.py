@@ -134,8 +134,11 @@ class OllamaStreamingLLM:
         return self._pool.submit(self._chat_stream, text)
 
     def shutdown(self) -> None:
-        self._shutdown = True
+        # Recycle the pool so the instance can be reused across sessions.
+        # History and model selection are preserved.
         try:
             self._pool.shutdown(wait=False)
         except Exception:
             pass
+        self._pool = ThreadPoolExecutor(max_workers=2)
+        self._shutdown = False

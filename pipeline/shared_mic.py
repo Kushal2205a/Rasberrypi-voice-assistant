@@ -1,3 +1,22 @@
+"""
+shared_mic.py — Single sounddevice InputStream shared between wake-word detection
+and the session recorder.
+
+WHY THIS EXISTS
+---------------
+ALSA hw devices (e.g. hw:3,0 / USB PnP mic) allow only ONE open stream at a
+time.  Opening a second PortAudio stream while the first is still alive —
+even milliseconds after closing it — raises "Device unavailable [-9985]".
+
+The fix: keep ONE stream open for the entire lifetime of the process and
+switch its routing between two modes:
+
+  WAKE mode    → downsample 44100→16kHz, feed OpenWakeWord model
+  SESSION mode → pass raw int16 chunks to StreamingRecorder.chunk_queue
+
+Mode switching is a single flag flip — no stream teardown, no ALSA close,
+no race condition.
+"""
 
 from __future__ import annotations
 

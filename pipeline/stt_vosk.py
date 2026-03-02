@@ -339,4 +339,11 @@ class PersistentVoskSTT:
             self._last_partial_time = 0.0
 
     def shutdown(self) -> None:
-        self.executor.shutdown(wait=False)
+        # Shut down old pool and immediately create a fresh one so this instance
+        # can be reused across sessions without rebuilding.
+        try:
+            self.executor.shutdown(wait=False)
+        except Exception:
+            pass
+        self.executor = ThreadPoolExecutor(max_workers=max(2, 2))
+        self.reset()

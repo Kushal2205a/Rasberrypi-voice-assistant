@@ -30,7 +30,11 @@ if _HAVE_GPIO:
     GPIO.setmode(GPIO.BCM)
     GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-
+import os
+os.environ.setdefault("OMP_NUM_THREADS", "2")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -270,14 +274,22 @@ def main_button(args: argparse.Namespace) -> None:
         return
 
     from recorder import StreamingRecorder
-    recorder  = StreamingRecorder(chunk_duration=CHUNK_DURATION, sample_rate=SAMPLE_RATE)
-    assistant = _build_assistant(args, recorder)
     try:
         print("Press the button to start the assistant.")
         while True:
             if GPIO.input(BUTTON_PIN) == GPIO.LOW:
                 print("Button pressed — running session.")
-                run_session(assistant, args.duration)
+                # Build a fresh assistant each session — STT/LLM executors
+                # can't be reused after shutdown() is called at session end.
+                recorder  = StreamingRecorder(chunk_duration=CHUNK_DURATION, sample_rate=SAMPLE_RATE)
+                assistant = _build_assistant(args, recorder)
+                try:
+                    run_session(assistant, args.duration)
+                finally:
+                    try:
+                        assistant.llm.shutdown()
+                    except Exception:
+                        pass
                 print("Session ended. Waiting for next press.")
                 while GPIO.input(BUTTON_PIN) == GPIO.LOW:
                     time.sleep(0.1)

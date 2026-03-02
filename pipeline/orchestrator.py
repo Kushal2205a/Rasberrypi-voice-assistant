@@ -35,7 +35,21 @@ import os
 from llm_model import speak_text_timed
 from llm_ollama_adapter import OllamaStreamingLLM
 
-from stt_vosk import PersistentVoskSTT as ParallelSTT
+try:
+    import os as _os
+    _stt_backend = _os.getenv("STT_BACKEND", "vosk").lower()
+    if _stt_backend == "whisper_server":
+        from stt_whisper_server import WhisperServerSTT as ParallelSTT
+        print("[STT] Using whisper.cpp server backend")
+    elif _stt_backend == "whisper":
+        from stt_whisper_cpp import WhisperCppSTT as ParallelSTT
+        print("[STT] Using whisper.cpp subprocess backend")
+    else:
+        from stt_vosk import PersistentVoskSTT as ParallelSTT
+        print("[STT] Using Vosk backend")
+except ImportError as _e:
+    from stt_vosk import PersistentVoskSTT as ParallelSTT
+    print(f"[STT] Falling back to Vosk ({_e})")
 
 
 @dataclass
