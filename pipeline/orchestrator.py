@@ -22,27 +22,21 @@ from config import (
     SWITCH_REQUIRE_CODEWORD,
 )
 from recorder import StreamingRecorder
-"""
-try:
-    from stt_faster import PersistentWhisperSTT as ParallelSTT
-except Exception:
-    from stt import ParallelSTT
-"""
+
 from tts import BufferedTTS
 
 #from llm_model import StreamingLLM, speak_text_timed
 import os
-from llm_model import speak_text_timed
 from llm_ollama_adapter import OllamaStreamingLLM
 
 try:
     import os as _os
     _stt_backend = _os.getenv("STT_BACKEND", "vosk").lower()
     if _stt_backend == "whisper_server":
-        from stt_whisper_server import WhisperServerSTT as ParallelSTT
+        from other_stt_models.stt_whisper_server import WhisperServerSTT as ParallelSTT
         print("[STT] Using whisper.cpp server backend")
     elif _stt_backend == "whisper":
-        from stt_whisper_cpp import WhisperCppSTT as ParallelSTT
+        from other_stt_models.stt_whisper_cpp import WhisperCppSTT as ParallelSTT
         print("[STT] Using whisper.cpp subprocess backend")
     else:
         from stt_vosk import PersistentVoskSTT as ParallelSTT
@@ -79,6 +73,36 @@ class PipelineStats:
     recording_to_first_llm_latency: Optional[float] = None
     recording_stop_to_first_tts_latency: Optional[float] = None
     recording_start_to_first_tts_latency: Optional[float] = None
+
+
+def speak_text_timed(text: str, cmd=None):
+    """
+    Very small wrapper that runs a TTS command and returns elapsed seconds.
+    Default uses `espeak text`. If you use a different TTS, pass `cmd` as a list,
+    e.g. ['tts-cli', '--out', '/tmp/out.wav', text] or similar.
+    """
+    text = (text or "").strip()
+    if not text:
+        return 0.0
+    if cmd is None:
+        # default simple espeak call; replace if you need a different TTS
+        cmd = ["espeak", text]
+    else:
+        # allow passing a format-string or a list; convert format-string to shell-safe list
+        if isinstance(cmd, str):
+            # user provided something like "mytts --text '{}'"
+            safe = cmd.format(shlex.quote(text))
+            cmd = shlex.split(safe)
+        elif isinstance(cmd, (list, tuple)):
+            # if list contains {} we substitute with text
+            cmd = [c.format(text) if ("{}" in c or "{text}" in c) else c for c in cmd]
+    t0 = time.time()
+    try:
+        subprocess.run(cmd, check=True)
+    except Exception:
+        # swallow TTS errors but still return elapsed
+        pass
+    return time.time() - t0
 
 
 class ParallelVoiceAssistant:
