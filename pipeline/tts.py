@@ -1,10 +1,10 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional,Any,Iterable,Callable, Dict, List
+from typing import Optional, Any, Iterable, Callable, Dict, List
 from concurrent.futures import Future, ThreadPoolExecutor
 
-import os, subprocess, threading, queue, json, selectors,wave,tempfile,shutil
-import numpy as np, sounddevice as sd 
+import os, subprocess, threading, queue, json, selectors, wave, tempfile, shutil
+import numpy as np, sounddevice as sd
 import time
 
 from config import PIPER_MODEL_PATH
@@ -29,21 +29,17 @@ class PiperVoiceInfo:
 
 
 class BufferedTTS:
-    """Generate speech with Piper asynchronously and stream playback via a CLI player."""
-
 
     def __init__(
         self,
         model_path: Path = PIPER_MODEL_PATH,
         playback_cmd: Optional[Iterable[str]] = None,
-
         output_device: Optional[Any] = None,
         use_subprocess: bool = False,
         on_playback_start: Optional[Callable[[str, float], None]] = None,
         on_playback_error: Optional[Callable[[], None]] = None,
-        timeout :int = 30,
-        blocking_playback :bool = True
-
+        timeout: int = 30,
+        blocking_playback: bool = True,
     ) -> None:
         self.model_path = Path(model_path)
         self.timeout = int(timeout)
@@ -60,26 +56,24 @@ class BufferedTTS:
             self.playback_cmd = list(playback_cmd)
         else:
             paplay = shutil.which("paplay")
-            aplay = shutil.which("aplay")
+            aplay  = shutil.which("aplay")
             if paplay:
-                # paplay works well with PulseAudio/Bluetooth
+                # NOTE: paplay handles PulseAudio/Bluetooth sinks; prefer over aplay when available
                 self.playback_cmd = ["paplay", "--raw",
-                                    "--rate", str(info.sample_rate),
-                                    "--channels", str(info.channels),
-                                    "--format", "s16le", "-"]
+                                     "--rate", str(info.sample_rate),
+                                     "--channels", str(info.channels),
+                                     "--format", "s16le", "-"]
             elif aplay:
                 self.playback_cmd = ["aplay", "-t", "raw",
-                                    "-f", "S16_LE",
-                                    "-r", str(info.sample_rate),
-                                    "-c", str(info.channels), "-"]
+                                     "-f", "S16_LE",
+                                     "-r", str(info.sample_rate),
+                                     "-c", str(info.channels), "-"]
             else:
-                # fallback to direct PortAudio playback if no cli players present
                 self.playback_cmd = []
                 self.use_subprocess = False
-                
-        self.blocking_playback = bool (blocking_playback)
-        
-        
+
+        self.blocking_playback = bool(blocking_playback)
+
         if output_device is None:
             self.output_device = None
         elif isinstance(output_device, int):
@@ -91,19 +85,18 @@ class BufferedTTS:
                 self.output_device = output_device
         else:
             self.output_device = output_device
+
         self.on_playback_start = on_playback_start
         self.on_playback_error = on_playback_error
-        
+
         self._piper_proc = None
         self._piper_lock = threading.Lock()
-        
-        self.out_dir = None 
+
+        self.out_dir = None
 
         self._playback_env = os.environ.copy()
         if isinstance(self.output_device, str):
-            # Hint to PulseAudio-based players which sink to target.
-            self._playback_env.setdefault("PULSE_SINK", self.output_device)
-
+            self._playback_env.setdefault("PULSE_SINK", self.output_device)  # hint PulseAudio which sink to target
 
     def _load_voice_info(self) -> PiperVoiceInfo:
         candidates = [
@@ -118,9 +111,9 @@ class BufferedTTS:
             except Exception:
                 continue
 
-            audio = metadata.get("audio", {}) if isinstance(metadata, dict) else {}
+            audio       = metadata.get("audio", {}) if isinstance(metadata, dict) else {}
             sample_rate = int(audio.get("sample_rate") or metadata.get("sample_rate", 22050))
-            channels = int(audio.get("channels", 1) or 1)
+            channels    = int(audio.get("channels", 1) or 1)
 
             speaker_id: Optional[int] = None
             if "speaker_id" in metadata:
@@ -152,7 +145,7 @@ class BufferedTTS:
             )
 
         return PiperVoiceInfo()
-    
+
     def _ensure_piper(self):
         if self._piper_proc and self._piper_proc.poll() is None:
             return
@@ -160,11 +153,10 @@ class BufferedTTS:
         if self.out_dir is None:
             self.out_dir = Path(tempfile.mkdtemp(prefix="piper_out_"))
 
-        # Resolve piper exe: 1) env PIPER_EXE  2) PATH (which)  3) common fallback
         import shutil
         piper_exe = (os.environ.get("PIPER_EXE")
-                or shutil.which("piper")
-                or os.path.expanduser("/usr/local/bin/piper/piper"))
+                     or shutil.which("piper")
+                     or os.path.expanduser("/usr/local/bin/piper/piper"))
 
         if not Path(piper_exe).exists() and shutil.which(piper_exe) is None:
             print(f"[TTS] Piper not found at '{piper_exe}'. Set PIPER_EXE or install piper.")
@@ -181,7 +173,7 @@ class BufferedTTS:
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,  # change to subprocess.STDOUT to debug
+                stderr=subprocess.DEVNULL,  # NOTE: change to subprocess.STDOUT to debug Piper output
                 text=False,
                 bufsize=0,
             )
@@ -189,7 +181,6 @@ class BufferedTTS:
         except Exception as e:
             print(f"[TTS] Failed to start Piper: {e}  (cmd: {' '.join(cmd)})")
             self._piper_proc = None
-
 
     def start_playback(self) -> None:
         if self.playing:
@@ -201,7 +192,6 @@ class BufferedTTS:
     def _playback_loop(self) -> None:
         while self.playing:
             try:
-
                 segment = self.speech_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
@@ -227,11 +217,12 @@ class BufferedTTS:
             try:
                 if segment.path:
                     Path(segment.path).unlink(missing_ok=True)
-
             except OSError:
                 pass
+
     def is_playing_audio(self) -> bool:
         return self._playing_audio.is_set()
+
     def _notify_playback_error(self) -> None:
         if self.on_playback_error is None:
             return
@@ -240,22 +231,21 @@ class BufferedTTS:
         except Exception as exc:
             print(f"[TTS] Playback error callback failed: {exc}")
 
-
     def _play_via_sounddevice(self, segment: SpeechSegment) -> bool:
         try:
             if segment.raw:
-                audio = np.frombuffer(segment.raw, dtype=np.int16)
+                audio   = np.frombuffer(segment.raw, dtype=np.int16)
                 max_val = float(np.iinfo(np.int16).max)
-                audio = audio.astype(np.float32) / max_val
+                audio   = audio.astype(np.float32) / max_val
                 if segment.channels > 1:
                     audio = audio.reshape(-1, segment.channels)
                 sample_rate = segment.sample_rate
             else:
                 with wave.open(segment.path, "rb") as wf:
                     sample_rate = wf.getframerate()
-                    channels = wf.getnchannels()
-                    sampwidth = wf.getsampwidth()
-                    frames = wf.getnframes()
+                    channels    = wf.getnchannels()
+                    sampwidth   = wf.getsampwidth()
+                    frames      = wf.getnframes()
                     audio_bytes = wf.readframes(frames)
 
                 dtype_map = {1: np.uint8, 2: np.int16, 4: np.int32}
@@ -293,10 +283,8 @@ class BufferedTTS:
                 self.on_playback_start(segment.path, time.time())
             cmd = list(self.playback_cmd)
             if isinstance(self.output_device, str) and cmd:
-                if (
-                    cmd[0] == "paplay"
-                    and not any(str(arg).startswith("--device=") for arg in cmd[1:])
-                ):
+                if (cmd[0] == "paplay"
+                        and not any(str(arg).startswith("--device=") for arg in cmd[1:])):
                     cmd = cmd + [f"--device={self.output_device}"]
                 elif cmd[0] == "aplay" and "-D" not in cmd:
                     cmd = cmd[:1] + ["-D", self.output_device] + cmd[1:]
@@ -310,14 +298,16 @@ class BufferedTTS:
                     check=True,
                     env=self._playback_env,
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL)
+                    stderr=subprocess.DEVNULL,
+                )
             else:
-                subprocess.run(cmd + [segment.path],
-                               check=True,
-                               env=self._playback_env,
-                               stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL
-                               )
+                subprocess.run(
+                    cmd + [segment.path],
+                    check=True,
+                    env=self._playback_env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
             return True
         except subprocess.CalledProcessError as exc:
             print(f"[TTS] Subprocess playback failed (exit {exc.returncode}) for {segment.path}: {exc}")
@@ -326,16 +316,13 @@ class BufferedTTS:
             print(f"[TTS] Subprocess playback failed for {segment.path}: {exc}")
             return False
 
-
     def generate_and_queue(self, text: str, segment_id: int) -> Optional[Future]:
         clean_text = " ".join((text or "").split())
         if not clean_text:
             return None
         return self.executor.submit(self._generate_speech, clean_text, segment_id)
 
-
     def _generate_speech(self, text: str, segment_id: int) -> Optional[SpeechSegment]:
-
         if not self.model_path.exists():
             print(f"[TTS] Piper model not found: {self.model_path}")
             return None
@@ -343,76 +330,68 @@ class BufferedTTS:
         utterance = " ".join((text or "").split())
         if not utterance:
             return None
-        
+
         with self._piper_lock:
             self._ensure_piper()
             proc = self._piper_proc
-            
+
             if not proc or proc.poll() is not None:
                 print("[TTS] Piper proc is not running")
-                return None 
-            
+                return None
+
             try:
-                proc.stdin.write((utterance + "\n" ).encode("utf-8"))
+                proc.stdin.write((utterance + "\n").encode("utf-8"))
                 proc.stdin.flush()
             except Exception as e:
                 print(f"[TTS] failed writing to piper: {e}")
-                
                 self._restart_piper_and_retry(utterance)
                 proc = self._piper_proc
-                
                 if not proc or proc.poll() is not None:
-                    return None 
-            
+                    return None
+
             payload = self._read_pcm_until_idle(proc.stdout, idle_ms=80)
             if not payload or self._looks_like_text(payload):
                 print("[TTS] Piper did not produce PCM; check --output_raw '-'")
-                return None 
-        
+                return None
+
             info = self._voice_info
             segment = SpeechSegment(
-                path = "",
-                raw = payload,
-                sample_rate = info.sample_rate or 22050,
-                channels = info.channels or 1,
-                text = utterance,
-                
+                path="",
+                raw=payload,
+                sample_rate=info.sample_rate or 22050,
+                channels=info.channels or 1,
+                text=utterance,
             )
-            
-            
-            
+
             self.speech_queue.put(segment)
-            return segment 
-            
-    
-    def _restart_piper_and_retry(self,utterance:str):
+            return segment
+
+    def _restart_piper_and_retry(self, utterance: str):
         try:
             if self._piper_proc:
                 self._piper_proc.kill()
         except Exception:
             pass
-        
-        self._piper_proc= None
+
+        self._piper_proc = None
         self._ensure_piper()
         if self._piper_proc and self._piper_proc.poll() is None:
             try:
                 self._piper_proc.stdin.write((utterance + "\n").encode("utf-8"))
                 self._piper_proc.stdin.flush()
-            except Exception as e : 
-                print(f"[TTS] Piper failed to retry : {e} ")
-                
-    def _read_pcm_until_idle(self,stdout,idle_ms = 120,max_ms=30_000)->bytes:
-        start = time.time()
-        idle_s = idle_ms/1000.0
-        deadline = start + (max_ms/1000.0)
-        
-        chunks = []
-        
-        stdout_fd = stdout.fileno()
-        sel = selectors.DefaultSelector()
-        
+            except Exception as e:
+                print(f"[TTS] Piper failed to retry: {e}")
+
+    def _read_pcm_until_idle(self, stdout, idle_ms: int = 120, max_ms: int = 30_000) -> bytes:
+        start    = time.time()
+        idle_s   = idle_ms / 1000.0
+        deadline = start + (max_ms / 1000.0)
+
+        chunks     = []
+        stdout_fd  = stdout.fileno()
+        sel        = selectors.DefaultSelector()
         sel.register(stdout_fd, selectors.EVENT_READ)
-        
+
         try:
             any_bytes = False
             while time.time() < deadline:
@@ -421,39 +400,32 @@ class BufferedTTS:
                     if not any_bytes:
                         continue
                     break
-                for _key,_mask in events :
+                for _key, _mask in events:
                     data = os.read(stdout_fd, 8192)
                     if not data:
                         payload = b"".join(chunks)
                         return payload if (len(payload) & 1) == 0 else payload[:-1]
-                    
                     chunks.append(data)
                     any_bytes = True
             payload = b"".join(chunks)
-            return payload if (len(payload)&1) == 0 else payload[:-1]
+            return payload if (len(payload) & 1) == 0 else payload[:-1]
         finally:
             try:
                 sel.unregister(stdout_fd)
             except Exception:
                 pass
-            
             try:
                 sel.close()
             except Exception:
                 pass
-        
 
     @staticmethod
     def _looks_like_text(payload: bytes) -> bool:
-        """Heuristic check to detect when Piper prints text instead of PCM."""
-
+        # NOTE: heuristic — random PCM rarely produces >60% printable ASCII; if it does, Piper likely emitted logs
         if not payload:
             return False
-
-        sample = payload[:64]
+        sample    = payload[:64]
         printable = sum(32 <= b <= 126 or b in (9, 10, 13) for b in sample)
-        # Random PCM rarely decodes into predominantly printable ASCII. Treat a
-        # mostly printable prefix as an indication that Piper emitted text/logs.
         return printable >= max(10, len(sample) * 0.6)
 
     def stop(self) -> None:
@@ -463,7 +435,7 @@ class BufferedTTS:
             self._playback_thread = None
         try:
             with self._piper_lock:
-                if self._piper_proc and self._piper_proc.poll() is None :
+                if self._piper_proc and self._piper_proc.poll() is None:
                     self._piper_proc.terminate()
                     try:
                         self._piper_proc.wait(timeout=0.5)
@@ -472,12 +444,11 @@ class BufferedTTS:
         except Exception:
             pass
         self._piper_proc = None
-        
+
         try:
             if self.out_dir:
                 import shutil
-                shutil.rmtree(self.out_dir,ignore_errors=True)
+                shutil.rmtree(self.out_dir, ignore_errors=True)
         finally:
             self.out_dir = None
         self.executor.shutdown(wait=False)
-    

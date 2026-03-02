@@ -1,4 +1,3 @@
-
 from pathlib import Path
 from typing import Optional, Any, Dict
 import os, tempfile, wave, subprocess, shutil
@@ -6,21 +5,16 @@ import os, tempfile, wave, subprocess, shutil
 from config import SAMPLE_RATE, WHISPER_EXE, WHISPER_MODEL, PIPER_MODEL_PATH, DEFAULT_SILENCE_THRESHOLD, DEFAULT_SILENCE_TIMEOUT
 
 
-
-
 class ModelPreloader:
-    """Utility helpers to warm up the local models so first inference is faster."""
 
     @staticmethod
-
     def warmup_whisper(
-        
-        whisper_exe: Path = WHISPER_EXE,
+        whisper_exe:   Path = WHISPER_EXE,
         whisper_model: Path = WHISPER_MODEL,
-        sample_rate: int = SAMPLE_RATE,
+        sample_rate:   int  = SAMPLE_RATE,
     ) -> None:
         print("[WARMUP] Priming whisper.cpp...")
-        exe = Path(whisper_exe)
+        exe   = Path(whisper_exe)
         model = Path(whisper_model)
         if not exe.exists():
             print(f"[WARMUP] Whisper binary missing at {exe}")
@@ -29,9 +23,9 @@ class ModelPreloader:
             print(f"[WARMUP] Whisper model missing at {model}")
             return
 
-        tmp_dir = Path(tempfile.mkdtemp(prefix="whisper_warmup_"))
+        tmp_dir  = Path(tempfile.mkdtemp(prefix="whisper_warmup_"))
         wav_path = tmp_dir / "warmup.wav"
-        success = True
+        success  = True
         try:
             with wave.open(str(wav_path), "wb") as wf:
                 wf.setnchannels(1)
@@ -39,15 +33,8 @@ class ModelPreloader:
                 wf.setframerate(sample_rate)
                 wf.writeframes(b"\x00" * sample_rate)
             cmd = [
-                str(exe),
-                "-m",
-                str(model),
-                "-f",
-                str(wav_path),
-                "--no-prints",
-                "--output-txt",
-                "-t",
-                "1",
+                str(exe), "-m", str(model), "-f", str(wav_path),
+                "--no-prints", "--output-txt", "-t", "1",
             ]
             subprocess.run(cmd, capture_output=True, timeout=30)
         except Exception as exc:
@@ -57,7 +44,6 @@ class ModelPreloader:
             shutil.rmtree(tmp_dir, ignore_errors=True)
         if success:
             print("[WARMUP] whisper.cpp ready")
-
 
     @staticmethod
     def warmup_llama(llama_kwargs: Optional[Dict[str, Any]] = None) -> None:

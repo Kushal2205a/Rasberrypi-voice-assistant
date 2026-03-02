@@ -1,27 +1,23 @@
 import time
-import psutil,threading,os
+import psutil, threading, os
+
 
 class ResourceSampler:
-    """
-    Sample current process RSS and CPU% at `interval` seconds in background.
-    Call start() before a heavy operation and stop() afterwards.
-    summary() returns a dict: peak_rss, avg_rss, peak_cpu, avg_cpu, samples.
-    If psutil is not available this becomes a minimal no-op sampler.
-    """
-    def __init__(self, interval=0.05):
+
+    def __init__(self, interval: float = 0.05) -> None:
         self.interval = float(interval)
         self._running = False
         self._thread = None
-        self.samples = []  # [(ts, rss_bytes, cpu_percent), ...]
+        self.samples: list = []  # [(timestamp, rss_bytes, cpu_percent), ...]
         if psutil:
             self._proc = psutil.Process(os.getpid())
         else:
             self._proc = None
 
-    def _loop(self):
-        # warm-up cpu_percent baseline
+    def _loop(self) -> None:
         try:
-            if self._proc: self._proc.cpu_percent(interval=None)
+            if self._proc:
+                self._proc.cpu_percent(interval=None)  # prime the baseline; first call always returns 0
         except Exception:
             pass
         while self._running:
@@ -37,20 +33,20 @@ class ResourceSampler:
                 pass
             time.sleep(self.interval)
 
-    def start(self):
+    def start(self) -> None:
         if self._running:
             return
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
-    def stop(self):
+    def stop(self) -> None:
         self._running = False
         if self._thread:
             self._thread.join(timeout=1.0)
             self._thread = None
 
-    def summary(self):
+    def summary(self) -> dict:
         if not self.samples:
             return {"peak_rss": 0, "avg_rss": 0, "peak_cpu": 0.0, "avg_cpu": 0.0, "samples": 0}
         rss_vals = [s[1] for s in self.samples]

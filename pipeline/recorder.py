@@ -15,23 +15,14 @@ except Exception:
 
 
 class StreamingRecorder:
-    """
-    Capture mic input and emit fixed-size int16 mono chunks.
-
-    Two operating modes:
-      Normal mode  — opens its own sd.InputStream (original behaviour).
-      Push mode    — SharedMicStream writes directly into chunk_queue via
-                     inject_audio(); no sd.InputStream is opened here.
-                     Activated by passing push_mode=True.
-    """
 
     def __init__(
         self,
-        chunk_duration: float        = CHUNK_DURATION,
-        sample_rate:    int          = SAMPLE_RATE,
+        chunk_duration: float         = CHUNK_DURATION,
+        sample_rate:    int           = SAMPLE_RATE,
         input_device:   Optional[int] = INPUT_DEVICE,
-        latency:        str          = "high",
-        push_mode:      bool         = False,
+        latency:        str           = "high",
+        push_mode:      bool          = False,
     ) -> None:
         self.chunk_duration = float(chunk_duration)
         self.sample_rate    = int(sample_rate)
@@ -51,12 +42,11 @@ class StreamingRecorder:
         self._last_status_log = 0.0
 
     def start(self) -> None:
-        self.recording = True   # always re-enable (may have been stopped by previous session)
+        self.recording = True
         if self._push_mode:
-            # SharedMicStream feeds us; no audio thread needed
             return
         if self._thread and self._thread.is_alive():
-            return  # already running in normal mode
+            return
         self._thread = threading.Thread(
             target=self._record_loop,
             name="StreamingRecorder",
@@ -65,10 +55,7 @@ class StreamingRecorder:
         self._thread.start()
 
     def inject_audio(self, indata: np.ndarray) -> None:
-        """
-        Called by SharedMicStream in SESSION mode to push raw audio in.
-        Replicates the PortAudio callback logic without opening a stream.
-        """
+        # Called by SharedMicStream in SESSION mode; replicates the PortAudio callback without opening a stream
         if not self.recording:
             return
 
@@ -94,7 +81,6 @@ class StreamingRecorder:
                         pass
 
     def _record_loop(self) -> None:
-        """Used only in normal (non-push) mode."""
         chunk_samples = int(self.chunk_duration * self.sample_rate)
         chunk_bytes   = chunk_samples * 2
 
@@ -155,8 +141,7 @@ class StreamingRecorder:
     def stop(self) -> None:
         self.recording = False
         if self._push_mode:
-            # In push mode the SharedMicStream keeps the real audio stream open.
-            # Just mark as not recording; start() will re-enable it next session.
+            # NOTE: SharedMicStream owns the real stream; just flag as stopped, start() re-enables next session
             return
         if self._thread:
             self._thread.join(timeout=1.0)

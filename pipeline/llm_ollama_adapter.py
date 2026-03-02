@@ -10,13 +10,6 @@ from config import MODEL
 
 
 class OllamaStreamingLLM:
-    """
-    Streaming adapter compatible with your existing API:
-      - set_stream_callback(fn)
-      - set_stream_context(ts)
-      - process_incremental(text, is_final) -> Optional[Future[str]]
-      - shutdown()
-    """
 
     def __init__(
         self,
@@ -33,7 +26,7 @@ class OllamaStreamingLLM:
 
         self.num_ctx = int(os.getenv("OLLAMA_NUM_CTX", str(num_ctx)))
         self.num_thread = int(os.getenv("OLLAMA_NUM_THREAD", str(num_thread)))
-        self.num_predict = int(os.getenv("OLLAMA_NUM_PREDICT", "32"))  # cap for speed
+        self.num_predict = int(os.getenv("OLLAMA_NUM_PREDICT", "32"))  # low cap keeps Pi latency acceptable
 
         self.chat_url = f"{self.host}/api/chat"
 
@@ -46,8 +39,6 @@ class OllamaStreamingLLM:
 
         self._stream_cb: Optional[Callable[[str], None]] = None
         self._stream_ref_ts: Optional[float] = None
-
-    # ------------------- Public controls -------------------
 
     def set_stream_callback(self, cb: Optional[Callable[[str], None]]) -> None:
         self._stream_cb = cb
@@ -71,8 +62,6 @@ class OllamaStreamingLLM:
             self.model = model
             if reset_history:
                 self._history.clear()
-
-    # ------------------- Internals -------------------
 
     def _trim_history(self) -> None:
         max_msgs = 2 * self._history_max_turns
@@ -126,16 +115,13 @@ class OllamaStreamingLLM:
 
         return content
 
-    # ------------------- Existing pipeline API -------------------
-
     def process_incremental(self, text: str, is_final: bool = False) -> Optional[Future]:
         if not is_final or self._shutdown or getattr(self._pool, "_shutdown", False):
             return None
         return self._pool.submit(self._chat_stream, text)
 
     def shutdown(self) -> None:
-        # Recycle the pool so the instance can be reused across sessions.
-        # History and model selection are preserved.
+        # NOTE: recycles the pool rather than destroying it so history/model are preserved across sessions
         try:
             self._pool.shutdown(wait=False)
         except Exception:

@@ -38,47 +38,31 @@ if _HAVE_GPIO:
     GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
 
-# ---------------------------------------------------------------------------
-# Audio cue helpers
-# ---------------------------------------------------------------------------
-
 def _bell_strike(freq: float = 1047.0, dur: float = 0.55,
                  sr: int = 22050, amp: float = 0.45) -> np.ndarray:
-    """
-    Synthesise a single bell strike.
-
-    A real bell doesn't ring at integer multiples of its fundamental —
-    it has *inharmonic* partials.  Using those ratios (2.76×, 5.40×, 8.93×)
-    plus per-partial exponential decay is what makes this sound like a
-    chime rather than a buzzer.
-    """
     t = np.linspace(0, dur, int(sr * dur), endpoint=False)
 
-    # (frequency_ratio, relative_gain)
+    # NOTE: real bells have inharmonic partials, not integer multiples — these ratios produce a chime, not a buzz
     partials = [
-        (1.00, 1.00),   # fundamental
-        (2.76, 0.50),   # inharmonic 2nd partial
-        (5.40, 0.25),   # 3rd partial
-        (8.93, 0.12),   # 4th partial — adds that glassy shimmer
+        (1.00, 1.00),
+        (2.76, 0.50),
+        (5.40, 0.25),
+        (8.93, 0.12),
     ]
     wave = np.zeros(len(t), dtype=np.float64)
     for ratio, gain in partials:
-        # Higher partials decay faster — matches real bell physics
-        decay = np.exp(-t * (5.0 + ratio * 1.5))
+        decay = np.exp(-t * (5.0 + ratio * 1.5))  # higher partials decay faster — matches real bell physics
         wave += gain * decay * np.sin(2 * np.pi * freq * ratio * t)
 
-    # Normalise then scale to desired amplitude
     wave = wave / (np.max(np.abs(wave)) + 1e-9) * amp
 
-    # 4 ms hard attack (feels like a physical strike, not a fade-in)
-    attack = max(1, int(sr * 0.004))
+    attack = max(1, int(sr * 0.004))  # 4 ms hard attack feels like a physical strike
     wave[:attack] *= np.linspace(0.0, 1.0, attack)
 
     return wave.astype(np.float32)
 
 
 def _play_audio(wave: np.ndarray, sr: int = 22050, output_device=None) -> None:
-    """Blocking playback. Fails silently — never crash over a missing beep."""
     if not _HAVE_SD:
         return
     try:
@@ -88,44 +72,28 @@ def _play_audio(wave: np.ndarray, sr: int = 22050, output_device=None) -> None:
 
 
 def _play_startup_chime(output_device=None) -> None:
-    """
-    Boot chime: two soft bell strikes played close together.
-    Tells the user 'the Pi is alive, wait a moment'.
-    Runs before any model loads so it's always instant.
-    """
-    sr = 22050
-    strike1 = _bell_strike(freq=880.0,  dur=0.55, sr=sr)   # A5
-    gap     = np.zeros(int(sr * 0.08),  dtype=np.float32)   # 80 ms gap
-    strike2 = _bell_strike(freq=880.0,  dur=0.55, sr=sr)   # A5 again (soft double-knock)
+    sr      = 22050
+    strike1 = _bell_strike(freq=880.0, dur=0.55, sr=sr)
+    gap     = np.zeros(int(sr * 0.08), dtype=np.float32)
+    strike2 = _bell_strike(freq=880.0, dur=0.55, sr=sr)
     chime   = np.concatenate([strike1, gap, strike2])
     _play_audio(chime, sr=sr, output_device=output_device)
 
 
 def _play_ready_chime(output_device=None) -> None:
-    """
-    Ready chime: two bell strikes rising by a minor third (C6 → Eb6).
-    Plays *before* the mic switches to SESSION mode so it cannot be
-    mistaken for speech.  Ascending interval = 'I'm ready for you'.
-    """
-    sr = 22050
-    strike1 = _bell_strike(freq=1047.0, dur=0.55, sr=sr)   # C6
-    gap     = np.zeros(int(sr * 0.10),  dtype=np.float32)   # 100 ms gap
-    strike2 = _bell_strike(freq=1245.0, dur=0.60, sr=sr)   # Eb6  (minor third up)
+    # NOTE: ascending minor third (C6 → Eb6) plays BEFORE mic switches to SESSION — cannot be mistaken for speech
+    sr      = 22050
+    strike1 = _bell_strike(freq=1047.0, dur=0.55, sr=sr)
+    gap     = np.zeros(int(sr * 0.10), dtype=np.float32)
+    strike2 = _bell_strike(freq=1245.0, dur=0.60, sr=sr)
     chime   = np.concatenate([strike1, gap, strike2])
     _play_audio(chime, sr=sr, output_device=output_device)
 
 
 def _speak_via_piper(text: str, piper_model: Path, output_device=None) -> None:
-    """
-    Speak a phrase using the Piper TTS binary.
-    Pipes raw PCM straight to aplay — no temp file.
-    Fails silently if Piper or aplay is unavailable.
-    """
     try:
-        piper_cmd = ["piper", "--model", str(piper_model),
-                     "--output_raw", "--quiet"]
-        aplay_cmd = ["aplay", "-t", "raw", "-f", "S16_LE",
-                     "-r", "22050", "-c", "1"]
+        piper_cmd = ["piper", "--model", str(piper_model), "--output_raw", "--quiet"]
+        aplay_cmd = ["aplay", "-t", "raw", "-f", "S16_LE", "-r", "22050", "-c", "1"]
         if output_device:
             aplay_cmd += ["-D", str(output_device)]
         aplay_cmd.append("-")
@@ -147,19 +115,11 @@ def _speak_via_piper(text: str, piper_model: Path, output_device=None) -> None:
         piper_proc.wait(timeout=12)
         aplay_proc.wait(timeout=12)
     except Exception:
-        pass   # never block startup over a failed announcement
+        pass
 
-
-# ---------------------------------------------------------------------------
-# Vosk pre-warm
-# ---------------------------------------------------------------------------
 
 def _prewarm_vosk(model_path=None) -> None:
-    """
-    Load the shared Vosk model singleton before any session starts.
-    After this call, PersistentVoskSTT.__init__ finds _SHARED_MODEL already
-    set and returns instantly — eliminating the first-press delay.
-    """
+    # NOTE: populates the _SHARED_MODEL singleton so the first session starts instantly
     try:
         from stt_vosk import _get_vosk_model
         from config import VOSK_MODEL_PATH
@@ -172,33 +132,16 @@ def _prewarm_vosk(model_path=None) -> None:
         print(f"[WARMUP] Vosk pre-warm failed (non-fatal): {exc}")
 
 
-# ---------------------------------------------------------------------------
-# Startup sequence
-# ---------------------------------------------------------------------------
-
 def _run_startup(args) -> None:
-    """
-    Runs once at process start.  Timeline:
-
-        t=0       Boot chime (two soft bell strikes — instant)
-        t=0       Piper says "Hello I'm Peppo, warming up the models"  ← background thread
-        t=0       Vosk model loads                                      ← foreground (parallel)
-        t=warm    Wait for Piper announcement to finish
-        t=warm    Ready chime (two rising bell strikes)
-        → user may now trigger a session
-    """
     print("[STARTUP] Starting up Peppo...")
 
-    # 1. Instant boot chime — tells user the Pi is alive before anything loads
     _play_startup_chime(output_device=args.output_device)
 
-    # 2. Voice announcement — start in background so Vosk loads in parallel
     piper_ok = Path(args.piper_model).exists()
     if piper_ok:
         ann_thread = threading.Thread(
             target=_speak_via_piper,
-            args=("Hello, I'm Peppo. Warming up the models.",
-                  args.piper_model),
+            args=("Hello, I'm Peppo. Warming up the models.", args.piper_model),
             kwargs={"output_device": args.output_device},
             daemon=True,
         )
@@ -207,21 +150,14 @@ def _run_startup(args) -> None:
         ann_thread = None
         print("[STARTUP] Piper model not found — skipping voice announcement.")
 
-    # 3. Vosk pre-warm (blocks here — runs while Piper speaks)
     _prewarm_vosk()
 
-    # 4. Wait for Piper to finish before the ready chime
     if ann_thread is not None:
         ann_thread.join(timeout=14)
 
-    # 5. Ready chime — safe to trigger from this point
     _play_ready_chime(output_device=args.output_device)
     print("[STARTUP] Peppo is ready.")
 
-
-# ---------------------------------------------------------------------------
-# Argument parser
-# ---------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Peppo voice assistant")
@@ -268,10 +204,6 @@ def _parse_args() -> argparse.Namespace:
 
     return parser.parse_args()
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _resolve_device(mic_device_arg):
     if mic_device_arg is not None:
@@ -324,10 +256,6 @@ def run_session(assistant, duration):
     assistant.run(duration=duration if duration and duration > 0 else None)
 
 
-# ---------------------------------------------------------------------------
-# Unified wake-word + button mode
-# ---------------------------------------------------------------------------
-
 def main_wake_word(args: argparse.Namespace) -> None:
     device = _resolve_device(args.mic_device)
 
@@ -356,7 +284,6 @@ def main_wake_word(args: argparse.Namespace) -> None:
         print(f"[{source}] Triggered — starting session.")
         _wake_event.set()
 
-    # --- Wake word detector ---
     detector = None
     if not args.no_wake_word:
         detector = WakeWordDetector(
@@ -369,7 +296,6 @@ def main_wake_word(args: argparse.Namespace) -> None:
 
     mic.attach_recorder(recorder)
 
-    # --- GPIO button thread — always active alongside wake word ---
     def _button_loop():
         if not _HAVE_GPIO:
             return
@@ -390,7 +316,6 @@ def main_wake_word(args: argparse.Namespace) -> None:
     btn_thread = threading.Thread(target=_button_loop, name="ButtonMonitor", daemon=True)
     btn_thread.start()
 
-    # --- Session runner ---
     def session_runner():
         while True:
             _wake_event.wait()
@@ -398,19 +323,14 @@ def main_wake_word(args: argparse.Namespace) -> None:
             _session_active.set()
             assistant = None
             try:
-                # 1. Build assistant while mic is still in WAKE mode
-                #    (Vosk is already warm — this is fast)
                 assistant = _build_assistant(args, recorder)
 
-                # 2. Play ready chime BEFORE switching to SESSION mode
-                #    Mic still routes to OWW here — chime cannot be heard as speech
+                # NOTE: chime plays while mic is still in WAKE mode — cannot be captured as speech input
                 _play_ready_chime(output_device=args.output_device)
 
-                # 3. Switch mic to SESSION and discard anything queued before now
                 mic.set_mode(SharedMicStream.SESSION)
                 recorder.clear_queue()
 
-                # 4. Begin listening
                 run_session(assistant, args.duration)
                 print("[Session] Ended — back to listening.")
 
@@ -450,10 +370,6 @@ def main_wake_word(args: argparse.Namespace) -> None:
             GPIO.cleanup()
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
 def main():
     args = _parse_args()
 
@@ -462,8 +378,8 @@ def main():
         WakeWordDetector.list_devices()
         return
 
-    _run_startup(args)      # chime → "Hello I'm Peppo" → Vosk warm → ready chime
-    main_wake_word(args)    # wake word + button coexist forever
+    _run_startup(args)
+    main_wake_word(args)
 
 
 if __name__ == "__main__":

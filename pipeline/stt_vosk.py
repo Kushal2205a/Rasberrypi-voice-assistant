@@ -1,4 +1,3 @@
-# pipeline/stt_vosk.py
 from __future__ import annotations
 
 from typing import Optional, Any, Dict, List
@@ -11,14 +10,12 @@ import math
 
 import numpy as np
 
-# Optional fast resampler (highly recommended on Pi)
 try:
     from scipy.signal import resample_poly
     _HAVE_SCIPY = True
 except Exception:
     _HAVE_SCIPY = False
 
-# Optional VAD: lightweight and accurate (+good for endpointing)
 try:
     import webrtcvad
     _HAVE_VAD = True
@@ -33,13 +30,13 @@ except Exception as e:
     _vosk_import_err = e
 
 from pathlib import Path
-from config import SAMPLE_RATE  # mic rate (e.g. 44100)
+from config import SAMPLE_RATE
 try:
     from config import VOSK_MODEL_PATH
 except Exception:
     VOSK_MODEL_PATH = Path.home() / "models" / "vosk-model-en-in-0.5"
 
-# Shared Vosk model across instances (avoid reload overhead)
+# NOTE: singleton — shared across all PersistentVoskSTT instances to avoid repeated disk loads
 _SHARED_MODEL = None
 _SHARED_LOCK = threading.Lock()
 
@@ -57,30 +54,19 @@ def _get_vosk_model(model_path: Path) -> VoskModel:
 @dataclass
 class _State:
     recognizer: KaldiRecognizer
-    stable_text: str = ""   # accumulated finalized segments
-    last_partial: str = ""  # to dedup partial emissions
+    stable_text: str = ""
+    last_partial: str = ""
 
 
 class PersistentVoskSTT:
     IS_STREAMING = True
-    """
-    Drop-in replacement for your ParallelSTT:
-      - submit_chunk(audio_chunk: np.ndarray, chunk_id: int) -> Future[{chunk_id,text,is_final}]
-      - finalize(chunk_id: int, mark_final: bool=True) -> Future[...]
-      - empty_future(chunk_id) -> Future[...]
-      - reset(), shutdown()
-
-    Design notes:
-      - Single-flight gating: Vosk recognizer isn't thread-safe, so we ensure only one decode runs at once.
-      - We buffer audio when busy so we don't drop words.
-    """
 
     def __init__(
         self,
         num_workers: int = 2,
-        sample_rate: int = SAMPLE_RATE,   # recorder/mic rate (e.g., 44100)
+        sample_rate: int = SAMPLE_RATE,
         emit_partials: bool = True,
-        vad_aggressiveness: int = 2,      # 0..3; higher = more aggressive
+        vad_aggressiveness: int = 2,
         min_partial_interval_ms: int = 120,
         model_path: Optional[Path] = None,
         **_ignore: Any,
@@ -88,15 +74,14 @@ class PersistentVoskSTT:
         if VoskModel is None or KaldiRecognizer is None:
             raise RuntimeError(f"vosk is not installed: {_vosk_import_err}")
 
-        # Thread pool exists, but we still enforce single-flight with locks.
         self.executor = ThreadPoolExecutor(max_workers=max(2, num_workers))
 
         self.sample_rate = int(sample_rate)
-        self._target_sr = 16000  # Vosk expects 16k
+        self._target_sr = 16000
 
-        # Pre-compute rational resample ratio (saves gcd per chunk)
+        # NOTE: pre-computed rational resample ratio avoids repeated gcd calls per chunk
         g = math.gcd(self.sample_rate, self._target_sr)
-        self._rs_up = self._target_sr // g
+        self._rs_up   = self._target_sr // g
         self._rs_down = self.sample_rate // g
 
         self.emit_partials = bool(emit_partials)
@@ -104,67 +89,37 @@ class PersistentVoskSTT:
 
         self._model = _get_vosk_model(Path(model_path or VOSK_MODEL_PATH))
         self._state = _State(KaldiRecognizer(self._model, self._target_sr))
-        
-        
-        
 
-        # VAD (optional)
         self._vad = (
             webrtcvad.Vad(vad_aggressiveness)
             if (_HAVE_VAD and vad_aggressiveness and vad_aggressiveness > 0)
             else None
         )
         self._frame_ms = 20
-        self._bytes_per_sample = 2  # int16 mono
+        self._bytes_per_sample = 2
 
-        # throttle partial emissions to avoid spam / extra CPU
         self._last_partial_time = 0.0
         self._min_partial_interval = (min_partial_interval_ms or 0) / 1000.0
 
-        # single-flight gate (avoid overlapping decodes)
+        # NOTE: single-flight gate — KaldiRecognizer is not thread-safe
         self._lock = threading.Lock()
         self._inflight = False
 
-        # audio buffered when STT is busy
         self._pending = bytearray()
-        
-        # VAD 
+
         self._vad_in_speech = False
         self._vad_speech_frames = 0
         self._vad_silence_frames = 0
 
-        # keep a little audio before speech is detected, so we don't clip first phonemes
         self._vad_preroll = bytearray()
         self._vad_preroll_ms = 200
         self._vad_preroll_frames = max(0, int(self._vad_preroll_ms / self._frame_ms))
 
-        # how long silence until we consider speech "ended" (used for trimming)
         self._vad_end_silence_ms = 700
         self._vad_end_silence_frames = max(1, int(self._vad_end_silence_ms / self._frame_ms))
 
-        # require a tiny amount of consecutive speech before entering "in speech"
         self._vad_min_speech_ms = 60
         self._vad_min_speech_frames = max(1, int(self._vad_min_speech_ms / self._frame_ms))
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-
-    # -------- helpers --------
 
     def empty_future(self, chunk_id: int) -> Future:
         f: Future = Future()
@@ -193,12 +148,6 @@ class PersistentVoskSTT:
         return dst.tobytes()
 
     def decode_grammar(self, audio_chunk: np.ndarray, phrases: List[str]) -> str:
-        """
-        One-off decode against a restricted grammar.
-
-        Used as a "second pass" for command phrases like
-        "switch to smart" / "switch to fast" when open-vocab decode is noisy.
-        """
         if audio_chunk is None or audio_chunk.size == 0 or not phrases:
             return ""
         audio_bytes = np.ascontiguousarray(audio_chunk, dtype=np.int16).tobytes()
@@ -210,7 +159,6 @@ class PersistentVoskSTT:
         try:
             recog = KaldiRecognizer(self._model, self._target_sr, grammar)
         except TypeError:
-            # older vosk builds
             recog = KaldiRecognizer(self._model, self._target_sr)
             try:
                 recog.SetGrammar(grammar)
@@ -259,8 +207,6 @@ class PersistentVoskSTT:
 
         return {"partial_text": partial_out, "had_final": had_final}
 
-    # -------- workers --------
-
     def _partial_worker(self, chunk_id: int, audio_bytes: bytes) -> Dict[str, Any]:
         try:
             audio_16k = self._resample_to_16k(audio_bytes)
@@ -277,7 +223,6 @@ class PersistentVoskSTT:
 
     def _finalize_worker(self, chunk_id: int, mark_final: bool) -> Dict[str, Any]:
         try:
-            # Consume any audio buffered while the worker was busy
             with self._lock:
                 leftover = bytes(self._pending)
                 self._pending.clear()
@@ -300,15 +245,12 @@ class PersistentVoskSTT:
             if final_seg:
                 text = (text + " " + final_seg).strip() if text else final_seg
 
-            # Reset recognizer for next utterance
             self._state = _State(KaldiRecognizer(self._model, self._target_sr))
             return {"chunk_id": chunk_id, "text": text, "is_final": bool(mark_final)}
         finally:
             with self._lock:
                 self.finalizing = False
                 self._inflight = False
-
-    # -------- public API --------
 
     def submit_chunk(self, audio_chunk: np.ndarray, chunk_id: int) -> Future:
         audio_bytes = np.ascontiguousarray(audio_chunk, dtype=np.int16).tobytes()
@@ -339,8 +281,7 @@ class PersistentVoskSTT:
             self._last_partial_time = 0.0
 
     def shutdown(self) -> None:
-        # Shut down old pool and immediately create a fresh one so this instance
-        # can be reused across sessions without rebuilding.
+        # NOTE: recycles pool so instance can be reused across sessions without a full rebuild
         try:
             self.executor.shutdown(wait=False)
         except Exception:
