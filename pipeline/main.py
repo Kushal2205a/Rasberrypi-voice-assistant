@@ -91,6 +91,16 @@ def _play_ready_chime(output_device=None) -> None:
     _play_audio(chime, sr=sr, output_device=output_device)
 
 
+def _play_done_chime(output_device=None) -> None:
+    # NOTE: descending minor third (Eb6 → C6) — mirror of ready chime; signals Peppo finished speaking
+    sr      = 22050
+    strike1 = _bell_strike(freq=1245.0, dur=0.55, sr=sr)
+    gap     = np.zeros(int(sr * 0.10), dtype=np.float32)
+    strike2 = _bell_strike(freq=1047.0, dur=0.60, sr=sr)
+    chime   = np.concatenate([strike1, gap, strike2])
+    _play_audio(chime, sr=sr, output_device=output_device)
+
+
 def _speak_via_piper(text: str, piper_model: Path, output_device=None) -> None:
     try:
         piper_cmd = [str(PIPER_EXE), "--model", str(piper_model), "--output_raw", "--quiet"]
@@ -135,6 +145,10 @@ def _prewarm_vosk(model_path=None) -> None:
 
 def _run_startup(args) -> None:
     print("[STARTUP] Starting up Peppo...")
+
+    # NOTE: chime plays first, *before* piper subprocess is launched, so there is no risk of
+    # aplay's internal audio buffer still draining when the chime starts playing.
+    _play_startup_chime(output_device=args.output_device)
 
     piper_ok = Path(args.piper_model).exists()
     if piper_ok:
@@ -248,6 +262,7 @@ def _build_assistant(args, recorder) -> ParallelVoiceAssistant:
         switch_codeword=args.switch_codeword,
         switch_require_codeword=args.switch_require_codeword,
         switch_reset_history=(not args.switch_keep_history),
+        post_speech_hook=lambda: _play_done_chime(output_device=args.output_device),
         _recorder=recorder,
     )
 
@@ -358,7 +373,6 @@ def main_wake_word(args: argparse.Namespace) -> None:
         if _HAVE_GPIO:
             mode_desc = (mode_desc + " + button").lstrip(" + ")
         print(f"[MAIN] Peppo active — trigger: {mode_desc}.  Ctrl-C to quit.\n")
-        _play_startup_chime(output_device=args.output_device)
         while True:
             time.sleep(0.1)
     except KeyboardInterrupt:

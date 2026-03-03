@@ -118,6 +118,7 @@ class ParallelVoiceAssistant:
         switch_codeword: str = SWITCH_CODEWORD,
         switch_require_codeword: bool = SWITCH_REQUIRE_CODEWORD,
         switch_reset_history: bool = True,
+        post_speech_hook: Optional[Any] = None,
         _recorder=None,
     ) -> None:
         self._chunk_duration = float(chunk_duration)
@@ -157,6 +158,7 @@ class ParallelVoiceAssistant:
         self._switch_codeword = (switch_codeword or "").strip().lower()
         self._switch_require_codeword = bool(switch_require_codeword)
         self._switch_reset_history = bool(switch_reset_history)
+        self._post_speech_hook = post_speech_hook
 
         self._cmd_audio_window_s = 2.5
         self._cmd_audio: Deque[np.ndarray] = deque(
@@ -440,6 +442,13 @@ class ParallelVoiceAssistant:
         self.stt.shutdown()
         self.llm.shutdown()
         self._wait_for_tts_completion()
+        # NOTE: done-chime fires after all TTS audio has drained — signals to the user that
+        # Peppo finished speaking and the wake word is active again.
+        if callable(self._post_speech_hook) and self.stats.tts_segments > 0:
+            try:
+                self._post_speech_hook()
+            except Exception as exc:
+                print(f"[TTS] post_speech_hook error: {exc}")
         if self.tts:
             self.tts.stop()
 

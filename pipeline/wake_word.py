@@ -105,19 +105,14 @@ class WakeWordDetector:
         with self._audio_lock:
             self._audio_q.clear()
 
-        with self._model_lock:
-            if self._model is not None:
-                try:
-                    self._model.reset()  # NOTE: clears internal mel-spectrogram buffer; older OWW may not have this
-                except Exception:
-                    pass
+        # NOTE: intentionally NOT calling model.reset() here.
+        # During a session, SharedMicStream routes audio to the recorder — OWW receives nothing.
+        # Its mel-spectrogram buffer is therefore stale-but-intact, and OWW can score new audio
+        # immediately without needing to rebuild the buffer from scratch (which takes ~1-2 s).
+        # Clearing just the score window below is sufficient to prevent a false trigger from
+        # any old high scores that were in-flight when the session started.
 
         self._score_window.clear()
-        # NOTE: after a session ends we want the wake word ready *immediately*.
-        # Setting _last_trigger to 0.0 means "never triggered" — cooldown is
-        # already satisfied. apply_cooldown=True is only used when we want to
-        # deliberately suppress re-detection (e.g. the detector just fired and
-        # the session is still spinning up).
         self._last_trigger = time.time() if apply_cooldown else 0.0
         print("[WakeWord] State reset — ready for next session.")
 
