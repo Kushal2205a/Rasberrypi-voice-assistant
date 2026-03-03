@@ -101,7 +101,7 @@ class WakeWordDetector:
         with self._audio_lock:
             self._audio_q.append(chunk_16k)
 
-    def reset_state(self) -> None:
+    def reset_state(self, apply_cooldown: bool = False) -> None:
         with self._audio_lock:
             self._audio_q.clear()
 
@@ -113,7 +113,12 @@ class WakeWordDetector:
                     pass
 
         self._score_window.clear()
-        self._last_trigger = time.time()
+        # NOTE: after a session ends we want the wake word ready *immediately*.
+        # Setting _last_trigger to 0.0 means "never triggered" — cooldown is
+        # already satisfied. apply_cooldown=True is only used when we want to
+        # deliberately suppress re-detection (e.g. the detector just fired and
+        # the session is still spinning up).
+        self._last_trigger = time.time() if apply_cooldown else 0.0
         print("[WakeWord] State reset — ready for next session.")
 
     @staticmethod
