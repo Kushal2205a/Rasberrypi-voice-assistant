@@ -98,6 +98,10 @@ class BufferedTTS:
         if isinstance(self.output_device, str):
             self._playback_env.setdefault("PULSE_SINK", self.output_device)  # hint PulseAudio which sink to target
 
+        # NOTE: start Piper eagerly so the first TTS request doesn't pay the process-spawn cost
+        with self._piper_lock:
+            self._ensure_piper()
+
     def _load_voice_info(self) -> PiperVoiceInfo:
         candidates = [
             self.model_path.with_suffix(self.model_path.suffix + ".json"),

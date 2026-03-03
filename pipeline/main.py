@@ -129,6 +129,34 @@ def _speak_via_piper(text: str, piper_model: Path, output_device=None) -> None:
         pass
 
 
+def _prewarm_ollama() -> None:
+    # NOTE: sends a 1-token request so Ollama loads the model weights into RAM now,
+    # not on the user's first question. Without this the first session pays a ~5s
+    # cold-load penalty that later sessions avoid (keep_alive holds the model in memory).
+    import requests as _req
+    host  = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+    model = os.getenv("OLLAMA_MODEL", os.getenv("MODEL_LITE", "qwen:0.5b"))
+    url   = f"{host}/api/chat"
+    print(f"[WARMUP] Pre-loading Ollama model '{model}' ...")
+    t0 = time.time()
+    try:
+        resp = _req.post(
+            url,
+            json={
+                "model":    model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream":   False,
+                "options":  {"num_predict": 1, "num_ctx": 64},
+                "keep_alive": os.getenv("LLM_KEEP_ALIVE", "30m"),
+            },
+            timeout=120,
+        )
+        resp.raise_for_status()
+        print(f"[WARMUP] Ollama model ready in {time.time() - t0:.1f}s")
+    except Exception as exc:
+        print(f"[WARMUP] Ollama pre-warm failed (non-fatal): {exc}")
+
+
 def _prewarm_vosk(model_path=None) -> None:
     # NOTE: populates the _SHARED_MODEL singleton so the first session starts instantly
     try:
@@ -165,8 +193,16 @@ def _run_startup(args) -> None:
 
     _prewarm_vosk()
 
+    # NOTE: Ollama warmup runs concurrently with the piper announcement — both are pure
+    # network/disk I/O so they don't contend. By the time the user hears "models are warming
+    # up", Ollama is already loading the weights; first session latency matches later sessions.
+    ollama_thread = threading.Thread(target=_prewarm_ollama, name="OllamaWarmup", daemon=True)
+    ollama_thread.start()
+
     if ann_thread is not None:
         ann_thread.join(timeout=14)
+
+    ollama_thread.join(timeout=120)
 
     # NOTE: ready chime is intentionally omitted here — it plays in session_runner
     # immediately before mic switches to SESSION mode, so it always means "I'm listening now".
