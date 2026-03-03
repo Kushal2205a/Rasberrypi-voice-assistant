@@ -383,6 +383,17 @@ def main_wake_word(args: argparse.Namespace) -> None:
                 recorder.clear_queue()
 
                 run_session(assistant, args.duration)
+
+                # NOTE: checked AFTER run() returns — by that point _wait_for_tts_completion()
+                # has already drained all audio including "Okay, shutting down. Goodbye."
+                if getattr(assistant, "shutdown_requested", False):
+                    print("[Shutdown] Graceful shutdown initiated — syncing filesystems.")
+                    try:
+                        subprocess.run(["sudo", "shutdown", "-h", "now"], check=True)
+                    except Exception as exc:
+                        print(f"[Shutdown] shutdown command failed: {exc}")
+                    return  # stop the session_runner loop; systemctl will handle the rest
+
                 print("[Session] Ended — back to listening.")
 
             except Exception as exc:

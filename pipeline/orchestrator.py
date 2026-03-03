@@ -226,6 +226,8 @@ class ParallelVoiceAssistant:
         self._flushed_since_last_speech = False
         self.espeak_tts = lambda text, segment_id: speak_text_timed(text)
 
+        self.shutdown_requested = False  # set to True when user says "shutdown" / "power off"
+
         self.llm.set_stream_callback(self._on_llm_token)
 
     def _register_activity(self) -> None:
@@ -571,6 +573,9 @@ class ParallelVoiceAssistant:
 
             print(f"[STT] Chunk {res_chunk_id}: {text}")
 
+            if is_final and self._maybe_handle_shutdown(text):
+                continue
+
             if is_final and self._maybe_handle_model_switch(text):
                 continue
 
@@ -713,6 +718,29 @@ class ParallelVoiceAssistant:
         if callable(fn):
             return (fn(audio, grammar) or "").strip()
         return ""
+
+    def _maybe_handle_shutdown(self, text: str) -> bool:
+        if not text:
+            return False
+
+        norm = re.sub(r"[^a-z0-9\s]+", " ", text.lower()).strip()
+
+        _SHUTDOWN_PHRASES = (
+            "shutdown", "shut down", "power off", "turn off",
+            "shut down peppo", "peppo shutdown", "peppo shut down",
+            "peppo power off", "peppo turn off",
+        )
+        if not any(phrase in norm for phrase in _SHUTDOWN_PHRASES):
+            return False
+
+        print("[Shutdown] Shutdown command detected — confirming and halting.")
+        self.shutdown_requested = True
+
+        # Speak confirmation first; _wait_for_tts_completion() in run() ensures
+        # the audio fully drains before main.py issues the OS shutdown command.
+        self._queue_tts_confirmation("Okay, shutting down. Goodbye.")
+        self._request_stop("[Shutdown] User requested shutdown; stopping session.")
+        return True
 
     def _maybe_handle_model_switch(self, text: str) -> bool:
         if not text:
