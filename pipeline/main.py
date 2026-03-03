@@ -20,6 +20,7 @@ from config import (
     INPUT_DEVICE,
     WHISPER_EXE,
     WHISPER_MODEL,
+    PIPER_EXE,
     PIPER_MODEL_PATH,
     DEFAULT_SILENCE_THRESHOLD,
     DEFAULT_SILENCE_TIMEOUT,
@@ -92,7 +93,7 @@ def _play_ready_chime(output_device=None) -> None:
 
 def _speak_via_piper(text: str, piper_model: Path, output_device=None) -> None:
     try:
-        piper_cmd = ["piper", "--model", str(piper_model), "--output_raw", "--quiet"]
+        piper_cmd = [str(PIPER_EXE), "--model", str(piper_model), "--output_raw", "--quiet"]
         aplay_cmd = ["aplay", "-t", "raw", "-f", "S16_LE", "-r", "22050", "-c", "1"]
         if output_device:
             aplay_cmd += ["-D", str(output_device)]
@@ -135,13 +136,11 @@ def _prewarm_vosk(model_path=None) -> None:
 def _run_startup(args) -> None:
     print("[STARTUP] Starting up Peppo...")
 
-    _play_startup_chime(output_device=args.output_device)
-
     piper_ok = Path(args.piper_model).exists()
     if piper_ok:
         ann_thread = threading.Thread(
             target=_speak_via_piper,
-            args=("Hello, I'm Peppo. Warming up the models.", args.piper_model),
+            args=("Hi, I'm Peppo. The models are warming up, please wait.", args.piper_model),
             kwargs={"output_device": args.output_device},
             daemon=True,
         )
@@ -155,7 +154,8 @@ def _run_startup(args) -> None:
     if ann_thread is not None:
         ann_thread.join(timeout=14)
 
-    _play_ready_chime(output_device=args.output_device)
+    # NOTE: ready chime is intentionally omitted here — it plays in session_runner
+    # immediately before mic switches to SESSION mode, so it always means "I'm listening now".
     print("[STARTUP] Peppo is ready.")
 
 
@@ -358,6 +358,7 @@ def main_wake_word(args: argparse.Namespace) -> None:
         if _HAVE_GPIO:
             mode_desc = (mode_desc + " + button").lstrip(" + ")
         print(f"[MAIN] Peppo active — trigger: {mode_desc}.  Ctrl-C to quit.\n")
+        _play_startup_chime(output_device=args.output_device)
         while True:
             time.sleep(0.1)
     except KeyboardInterrupt:

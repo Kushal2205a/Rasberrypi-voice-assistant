@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Optional, Any, Dict
 import os, tempfile, wave, subprocess, shutil
 
-from config import SAMPLE_RATE, WHISPER_EXE, WHISPER_MODEL, PIPER_MODEL_PATH, DEFAULT_SILENCE_THRESHOLD, DEFAULT_SILENCE_TIMEOUT
+from config import SAMPLE_RATE, WHISPER_EXE, WHISPER_MODEL, PIPER_EXE, PIPER_MODEL_PATH, DEFAULT_SILENCE_THRESHOLD, DEFAULT_SILENCE_TIMEOUT
 
 
 class ModelPreloader:
@@ -73,7 +73,7 @@ class ModelPreloader:
         if not model_path.exists():
             print(f"[WARMUP] Piper model missing at {model_path}")
             return
-        cmd = ["piper", "-m", str(model_path), "--output_file", "/tmp/piper_warmup.wav"]
+        cmd = [str(PIPER_EXE), "-m", str(model_path), "--output_file", "/tmp/piper_warmup.wav"]
         try:
             subprocess.run(cmd, input="Warm up".encode("utf-8"), check=True, timeout=10)
         except Exception as exc:

@@ -26,6 +26,7 @@ WHISPER_MODEL = Path.home() / "whisper.cpp" / "models" / "ggml-tiny.bin"
 
 VOSK_MODEL_PATH = Path.home() / "models" / "vosk-model-en-us-0.22"
 
+PIPER_EXE          = Path(os.getenv("PIPER_EXE", "/usr/local/bin/piper/piper"))
 PIPER_MODEL_PATH   = Path.home() / "Rasberrypi-voice-assistant" / "voices" / "en_US-amy-medium.onnx"
 WHISPER_SERVER_URL = "http://127.0.0.1:8080"
 WAKE_WORD      = os.getenv("WAKE_WORD", "hey_jarvis")
